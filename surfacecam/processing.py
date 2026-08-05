@@ -111,6 +111,43 @@ def side_by_side(*imgs: np.ndarray, height: int = 480) -> np.ndarray:
     return cv2.hconcat(resized)
 
 
+def apply_aspect(frame: np.ndarray, out_w: int, out_h: int, mode: str = "fit",
+                 bg: int = 0) -> np.ndarray:
+    """Resize `frame` into an out_h x out_w canvas without distortion.
+
+    mode:
+      "fit"     - scale to fit inside, preserve aspect, letterbox (no crop)
+      "fill"    - scale to cover, preserve aspect, center-crop the overflow
+      "stretch" - scale to exactly out_w x out_h (distorts aspect)
+    """
+    if out_w <= 0 or out_h <= 0:
+        return frame
+    if frame.ndim == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    h, w = frame.shape[:2]
+
+    if mode == "stretch":
+        return cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+
+    if mode == "fill":
+        s = max(out_w / w, out_h / h)
+        nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+        resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        x0 = (nw - out_w) // 2
+        y0 = (nh - out_h) // 2
+        return resized[y0:y0 + out_h, x0:x0 + out_w]
+
+    # default: "fit" (letterbox)
+    s = min(out_w / w, out_h / h)
+    nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((out_h, out_w, 3), bg, np.uint8)
+    x0 = (out_w - nw) // 2
+    y0 = (out_h - nh) // 2
+    canvas[y0:y0 + nh, x0:x0 + nw] = resized
+    return canvas
+
+
 def label(img: np.ndarray, text: str) -> np.ndarray:
     out = img.copy()
     cv2.rectangle(out, (0, 0), (out.shape[1], 26), (0, 0, 0), -1)

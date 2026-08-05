@@ -34,23 +34,35 @@ Requires Windows with a Hello IR camera and Python 3.10–3.12.
 ## Run
 
 ```bash
-python main.py                 # live multi-mode viewer
+python main.py                 # native GUI viewer (menu bar) - default
+python main.py --cv            # legacy OpenCV window (keyboard only)
 python main.py --enumerate     # list camera sources
 python main.py --selftest      # open both cams, save sample frames, exit (no window)
 ```
 
-### Controls
+### GUI
+
+The default viewer is a native Windows window with a **menu bar**:
+
+- **View → Mode** — IR / RGB / side-by-side / fusion / edge-fusion / proximity / IR-edges
+- **View → Aspect ratio** — **Fit** (letterbox, no crop), **Fill** (crop to fill),
+  **Stretch** (ignore aspect). Default is *Fit*, so the video is never distorted.
+- **Capture** — Snapshot, Start/Stop recording, Open captures folder
+- **Overlay** — live IR↔RGB alignment (move / zoom / opacity) for the fusion modes
+- **Help** — controls & about
+
+Keyboard shortcuts mirror the menus:
 
 | Key | Action |
 |-----|--------|
-| `1`–`7` | switch mode (IR / RGB / side / fuse / edge-fuse / proximity / IR-edges) |
+| `1`–`7` | switch mode |
+| `F` / `L` / `T` | aspect Fit / Fill / Stretch |
 | arrows | nudge the IR overlay alignment |
 | `[` `]` | scale the IR overlay |
 | `-` `+` | fusion overlay opacity |
-| `s` | save a snapshot (PNG) |
-| `v` | start/stop recording (MP4) |
-| `h` | toggle help overlay |
-| `ESC` | quit (releases the camera, IR emitter off) |
+| `Ctrl+S` | save a snapshot (PNG) |
+| `Ctrl+R` | start/stop recording (MP4) |
+| `Esc` | quit (releases the camera, IR emitter off) |
 
 Output files go to `captures/`.
 
@@ -75,8 +87,9 @@ depth to read. Two honest alternatives:
 main.py                     entry point / CLI
 surfacecam/
   capture.py                MediaFrameSource wrapper (RGB + IR -> numpy)
-  processing.py             colormaps, fusion, proximity, alignment
-  app.py                    live OpenCV viewer
+  processing.py             colormaps, fusion, proximity, alignment, aspect
+  gui.py                    native Tkinter viewer with menu bar (default)
+  app.py                    legacy OpenCV viewer (--cv)
 scripts/enumerate_sources.py  standalone source enumeration probe
 ```
 

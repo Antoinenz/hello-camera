@@ -81,6 +81,8 @@ def main():
                     help="open cameras, save sample frames, exit (no GUI)")
     ap.add_argument("--enumerate", action="store_true",
                     help="list media frame sources and exit")
+    ap.add_argument("--cv", action="store_true",
+                    help="use the legacy OpenCV window instead of the native GUI")
     args = ap.parse_args()
 
     if args.enumerate:
@@ -89,7 +91,10 @@ def main():
     if args.selftest:
         return cmd_selftest()
 
-    from surfacecam.app import run
+    if args.cv:
+        from surfacecam.app import run
+    else:
+        from surfacecam.gui import run
     run()
     return 0
 
