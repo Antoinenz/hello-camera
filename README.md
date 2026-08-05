@@ -1,0 +1,90 @@
+# SurfaceCam — Windows Hello RGB + IR viewer
+
+View and fuse the two cameras inside a Surface Laptop's Windows Hello module:
+the normal **RGB webcam** and the **near-infrared (IR)** sensor that Hello uses
+for face unlock. The IR sensor is not visible to DirectShow apps (ffmpeg, OBS,
+the Camera app) — it lives on the modern **MediaFoundation / Media Frame Source**
+API, which this project drives from Python via the `winsdk` WinRT projection.
+
+Nothing here bypasses a security control. Windows exposes these sources to
+normal apps by design; it only reserves the IR stream momentarily while Hello is
+mid-authentication. This tool just *reads* the sensors — it does **not** feed
+frames back to spoof Hello.
+
+## Features
+
+- **IR** — raw near-IR grayscale (the IR emitter powers on while streaming)
+- **RGB** — the standard color webcam
+- **Side by side** — RGB next to a false-colored IR view
+- **RGB + IR fusion** — IR overlaid on the color image, live-adjustable alignment
+- **RGB + IR edges** — IR-derived edges drawn over the RGB frame
+- **Proximity map** — IR intensity false-colored as a closeness proxy
+  (see *Depth*, below)
+- **IR edges** — Canny edges of the IR frame
+- Snapshot to PNG and record to MP4
+
+## Install
+
+```bash
+pip install -r requirements.txt
+```
+
+Requires Windows with a Hello IR camera and Python 3.10–3.12.
+
+## Run
+
+```bash
+python main.py                 # live multi-mode viewer
+python main.py --enumerate     # list camera sources
+python main.py --selftest      # open both cams, save sample frames, exit (no window)
+```
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| `1`–`7` | switch mode (IR / RGB / side / fuse / edge-fuse / proximity / IR-edges) |
+| arrows | nudge the IR overlay alignment |
+| `[` `]` | scale the IR overlay |
+| `-` `+` | fusion overlay opacity |
+| `s` | save a snapshot (PNG) |
+| `v` | start/stop recording (MP4) |
+| `h` | toggle help overlay |
+| `ESC` | quit (releases the camera, IR emitter off) |
+
+Output files go to `captures/`.
+
+## About "depth"
+
+The Surface Hello camera has a **color** and an **infrared** sensor — but **no
+depth sensor** (no stereo pair, no time-of-flight). So there is no true metric
+depth to read. Two honest alternatives:
+
+1. **Proximity map (implemented).** IR flood illumination falls off with
+   distance, so IR brightness is a rough proxy for how close something is.
+   The `proximity` mode false-colors this. It is a real signal, but it is
+   *not* calibrated depth — a white shirt up close and a face further away can
+   read similarly.
+2. **ML monocular depth (optional, not installed).** A model such as MiDaS can
+   *estimate* depth from the RGB image alone. It needs PyTorch (~2GB), so it is
+   left as an opt-in dependency in `requirements.txt`.
+
+## Layout
+
+```
+main.py                     entry point / CLI
+surfacecam/
+  capture.py                MediaFrameSource wrapper (RGB + IR -> numpy)
+  processing.py             colormaps, fusion, proximity, alignment
+  app.py                    live OpenCV viewer
+scripts/enumerate_sources.py  standalone source enumeration probe
+```
+
+## How it works
+
+1. Enumerate `MediaFrameSourceGroup`s and pick the one exposing both a
+   `COLOR` and an `INFRARED` source (the Hello "sensor group").
+2. Open **one** `MediaCapture` on that group in exclusive mode (CPU memory).
+3. Create one `MediaFrameReader` per sensor; each `SoftwareBitmap` is copied
+   into a numpy array (IR → GRAY8, color → BGRA8 → BGR).
+4. Process and display with OpenCV.

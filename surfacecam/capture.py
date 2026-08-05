@@ -1,0 +1,222 @@
+"""Access the Surface's Windows Hello camera module (RGB + IR) via the
+Windows MediaFoundation / Media Frame Source API (WinRT, through `winsdk`).
+
+The Hello module exposes two sensors on one physical USB device:
+  - COLOR    (MI_00) - normal RGB webcam
+  - INFRARED (MI_02) - near-IR sensor used by Windows Hello, with an IR emitter
+
+Both are bundled in a single "sensor group", so we open ONE MediaCapture on
+that group and create one frame reader per sensor. Opening the IR reader in
+exclusive mode is what powers on the IR emitter.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+
+import numpy as np
+
+from winsdk.windows.media.capture.frames import (
+    MediaFrameSourceGroup,
+    MediaFrameSourceKind,
+    MediaFrameReaderStartStatus,
+)
+from winsdk.windows.media.capture import (
+    MediaCapture,
+    MediaCaptureInitializationSettings,
+    MediaCaptureMemoryPreference,
+    MediaCaptureSharingMode,
+    StreamingCaptureMode,
+)
+from winsdk.windows.graphics.imaging import SoftwareBitmap, BitmapPixelFormat
+from winsdk.windows.storage.streams import Buffer
+from winsdk.windows.security.cryptography import CryptographicBuffer
+
+
+# ---------------------------------------------------------------------------
+# SoftwareBitmap -> numpy helpers
+# ---------------------------------------------------------------------------
+def _bitmap_bytes(bmp: SoftwareBitmap, bpp: int) -> bytes:
+    w, h = bmp.pixel_width, bmp.pixel_height
+    buf = Buffer(w * h * bpp)
+    bmp.copy_to_buffer(buf)
+    return bytes(CryptographicBuffer.copy_to_byte_array(buf))
+
+
+def bitmap_to_gray(bmp: SoftwareBitmap) -> np.ndarray:
+    """IR frame -> 2D uint8 array (16-bit sources are scaled down to 8-bit)."""
+    fmt = bmp.bitmap_pixel_format
+    w, h = bmp.pixel_width, bmp.pixel_height
+    if fmt == BitmapPixelFormat.GRAY16:
+        raw = _bitmap_bytes(bmp, 2)
+        arr = np.frombuffer(raw, np.uint16).reshape(h, w)
+        return (arr >> 8).astype(np.uint8)
+    if fmt != BitmapPixelFormat.GRAY8:
+        bmp = SoftwareBitmap.convert(bmp, BitmapPixelFormat.GRAY8)
+        w, h = bmp.pixel_width, bmp.pixel_height
+    raw = _bitmap_bytes(bmp, 1)
+    return np.frombuffer(raw, np.uint8).reshape(h, w)
+
+
+def bitmap_to_bgr(bmp: SoftwareBitmap) -> np.ndarray:
+    """Color frame -> HxWx3 uint8 BGR array (ready for OpenCV)."""
+    if bmp.bitmap_pixel_format != BitmapPixelFormat.BGRA8:
+        bmp = SoftwareBitmap.convert(bmp, BitmapPixelFormat.BGRA8)
+    w, h = bmp.pixel_width, bmp.pixel_height
+    raw = _bitmap_bytes(bmp, 4)
+    arr = np.frombuffer(raw, np.uint8).reshape(h, w, 4)
+    # WinRT BGRA8 stores bytes as B,G,R,A -> first three channels are already BGR
+    return arr[:, :, :3].copy()
+
+
+# ---------------------------------------------------------------------------
+# Camera wrapper
+# ---------------------------------------------------------------------------
+@dataclass
+class _SourceRef:
+    info_id: str
+    reader: object = None
+
+
+class SurfaceCameras:
+    """Synchronous facade over the async WinRT camera API.
+
+    Usage:
+        cams = SurfaceCameras(color=True, ir=True)
+        cams.open()
+        bgr = cams.read_color()   # HxWx3 uint8 or None
+        ir  = cams.read_ir()      # HxW  uint8 or None
+        cams.close()
+    """
+
+    def __init__(self, color: bool = True, ir: bool = True, max_color_width: int = 1280):
+        self.want_color = color
+        self.want_ir = ir
+        self.max_color_width = max_color_width
+        self._mc: MediaCapture | None = None
+        self._color = _SourceRef("")
+        self._ir = _SourceRef("")
+        self.color_size: tuple[int, int] | None = None
+        self.ir_size: tuple[int, int] | None = None
+
+    # -- public sync API ---------------------------------------------------
+    def open(self):
+        asyncio.run(self._open_async())
+
+    def read_color(self) -> np.ndarray | None:
+        return self._read(self._color, bitmap_to_bgr) if self.want_color else None
+
+    def read_ir(self) -> np.ndarray | None:
+        return self._read(self._ir, bitmap_to_gray) if self.want_ir else None
+
+    def close(self):
+        try:
+            asyncio.run(self._close_async())
+        except Exception:
+            pass
+
+    # -- internals ---------------------------------------------------------
+    def _read(self, ref: _SourceRef, conv):
+        if ref.reader is None:
+            return None
+        frame = ref.reader.try_acquire_latest_frame()
+        if frame is None:
+            return None
+        vmf = frame.video_media_frame
+        if vmf is None:
+            return None
+        bmp = vmf.software_bitmap
+        if bmp is None:
+            return None
+        return conv(bmp)
+
+    async def _open_async(self):
+        groups = await MediaFrameSourceGroup.find_all_async()
+
+        # Prefer a single group that contains every source kind we want.
+        need = set()
+        if self.want_color:
+            need.add(MediaFrameSourceKind.COLOR)
+        if self.want_ir:
+            need.add(MediaFrameSourceKind.INFRARED)
+
+        chosen = None
+        for g in groups:
+            kinds = {si.source_kind for si in g.source_infos}
+            if need.issubset(kinds):
+                chosen = g
+                break
+        if chosen is None:
+            raise RuntimeError(
+                f"No sensor group exposes all of {[k.name for k in need]}. "
+                f"Available groups: {[g.display_name for g in groups]}"
+            )
+
+        for si in chosen.source_infos:
+            if si.source_kind == MediaFrameSourceKind.COLOR and self.want_color:
+                self._color.info_id = si.id
+            elif si.source_kind == MediaFrameSourceKind.INFRARED and self.want_ir:
+                self._ir.info_id = si.id
+
+        settings = MediaCaptureInitializationSettings()
+        settings.source_group = chosen
+        settings.memory_preference = MediaCaptureMemoryPreference.CPU
+        settings.streaming_capture_mode = StreamingCaptureMode.VIDEO
+        settings.sharing_mode = MediaCaptureSharingMode.EXCLUSIVE_CONTROL
+
+        mc = MediaCapture()
+        await mc.initialize_async(settings)
+        self._mc = mc
+
+        if self.want_color and self._color.info_id:
+            src = mc.frame_sources[self._color.info_id]
+            await self._maybe_set_color_format(src)
+            self.color_size = (src.current_format.video_format.width,
+                               src.current_format.video_format.height)
+            reader = await mc.create_frame_reader_async(src)
+            status = await reader.start_async()
+            _check(status, "color")
+            self._color.reader = reader
+
+        if self.want_ir and self._ir.info_id:
+            src = mc.frame_sources[self._ir.info_id]
+            self.ir_size = (src.current_format.video_format.width,
+                            src.current_format.video_format.height)
+            reader = await mc.create_frame_reader_async(src)
+            status = await reader.start_async()
+            _check(status, "infrared")
+            self._ir.reader = reader
+
+    async def _maybe_set_color_format(self, src):
+        """Pick a reasonable uncompressed color format so software_bitmap is
+        populated and resolution stays manageable."""
+        best = None
+        for f in src.supported_formats:
+            sub = (f.subtype or "").upper()
+            if sub not in ("NV12", "YUY2", "YUYV"):
+                continue
+            vf = f.video_format
+            if vf.width > self.max_color_width:
+                continue
+            area = vf.width * vf.height
+            if best is None or area > best[0]:
+                best = (area, f)
+        if best is not None:
+            await src.set_format_async(best[1])
+
+    async def _close_async(self):
+        for ref in (self._color, self._ir):
+            if ref.reader is not None:
+                try:
+                    await ref.reader.stop_async()
+                except Exception:
+                    pass
+                ref.reader = None
+        if self._mc is not None:
+            self._mc.close()
+            self._mc = None
+
+
+def _check(status, name):
+    if status != MediaFrameReaderStartStatus.SUCCESS:
+        raise RuntimeError(f"Failed to start {name} reader: {status!r}")

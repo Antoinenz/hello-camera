@@ -1,0 +1,9 @@
+winsdk>=1.0.0b10
+numpy>=1.24
+opencv-python>=4.8
+
+# Optional: ML monocular depth estimation (large download, ~2GB).
+# Uncomment and `pip install -r requirements.txt` to enable the future
+# `depth-ml` mode.
+# torch
+# timm
