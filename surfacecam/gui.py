@@ -63,6 +63,7 @@ class ViewerGUI:
         self.statusbar_var = tk.BooleanVar(value=True)
         self.fps_var = tk.BooleanVar(value=True)
         self.autoalign_live_var = tk.BooleanVar(value=False)
+        self.antiflicker_var = tk.BooleanVar(value=self.cams.hold_illuminated)
 
         self._build_menu()
         self._build_widgets()
@@ -94,6 +95,9 @@ class ViewerGUI:
 
         view.add_separator()
         view.add_checkbutton(label="Show FPS overlay", variable=self.fps_var)
+        view.add_checkbutton(label="Anti-flicker (hold IR illuminated frame)",
+                             variable=self.antiflicker_var,
+                             command=self._toggle_antiflicker)
         view.add_checkbutton(label="Show status bar", variable=self.statusbar_var,
                              command=self._toggle_statusbar)
         view.add_command(label="Reset IR alignment", command=self._reset_align)
@@ -330,9 +334,15 @@ class ViewerGUI:
         self.aligner = P.Aligner()
         self.alpha = 0.5
 
+    def _toggle_antiflicker(self):
+        self.cams.hold_illuminated = self.antiflicker_var.get()
+        state = "on" if self.antiflicker_var.get() else "off (raw strobed IR)"
+        self.status.config(text=f"anti-flicker {state}")
+
     def _toggle_statusbar(self):
         if self.statusbar_var.get():
-            self.status.pack(fill="x", side="bottom")
+            # re-pack BEFORE the expanding canvas so it reclaims its space
+            self.status.pack(fill="x", side="bottom", before=self.canvas)
         else:
             self.status.pack_forget()
 

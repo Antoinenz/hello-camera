@@ -48,6 +48,9 @@ The default viewer is a native Windows window with a **menu bar**:
 - **View → Aspect ratio** — **Fit** (letterbox, no crop), **Fill** (crop to fill),
   **Stretch** (ignore aspect). Default is *Fit*, so the video is never distorted.
 - **View → Show FPS overlay** — draw the live frame rate on the image
+- **View → Anti-flicker** — hold the last illuminated IR frame so the strobing
+  emitter doesn't make the IR view flicker (on by default; turn off to see the
+  raw alternating bright/dark frames)
 - **Capture** — Snapshot, Start/Stop recording, Open captures folder
 - **Overlay** — **Auto-align** the IR onto the RGB feed, plus manual
   move / zoom / opacity for the fusion modes
