@@ -107,7 +107,8 @@ class SurfaceCameras:
         self.color_size: tuple[int, int] | None = None
         self.ir_size: tuple[int, int] | None = None
         self._last_ir: np.ndarray | None = None
-        self._ir_bright: float = 0.0
+        self._ir_bright: float = 0.0     # tracked illuminated-frame level
+        self._ir_dark: float = 0.0       # tracked non-illuminated level
         # counts distinct *illuminated* IR frames accepted (held-frame stream);
         # lets a consumer measure the true illuminated frame rate
         self.ir_new_count: int = 0
@@ -136,17 +137,24 @@ class SurfaceCameras:
         if arr is None:
             return self._last_ir            # keep last good frame across gaps
         m = float(arr.mean())
-        # track a decaying reference of the illuminated brightness level
-        if m > self._ir_bright:
-            self._ir_bright = m
-        else:
-            self._ir_bright = 0.95 * self._ir_bright + 0.05 * m
-        thresh = max(6.0, 0.4 * self._ir_bright)
-        if m >= thresh or self._last_ir is None:
-            self._last_ir = arr             # illuminated -> use, remember, count
+        if self._last_ir is None:           # first frame: accept and seed levels
+            self._ir_bright = self._ir_dark = m
+            self._last_ir = arr
             self.ir_new_count += 1
             return arr
-        return self._last_ir                # dark strobe frame -> hold previous
+        # Track the two strobe levels: bright rises fast / decays slow, dark
+        # falls fast / rises slow. Split illuminated vs dark at their midpoint,
+        # but only when there's real strobe contrast - otherwise pass frames
+        # through (nothing to gate).
+        self._ir_bright = max(m, 0.90 * self._ir_bright + 0.10 * m)
+        self._ir_dark = min(m, 0.90 * self._ir_dark + 0.10 * m)
+        contrast = self._ir_bright - self._ir_dark
+        midpoint = 0.5 * (self._ir_bright + self._ir_dark)
+        if contrast > 0.25 * max(self._ir_bright, 1.0) and m < midpoint:
+            return self._last_ir            # dark strobe frame -> hold previous
+        self._last_ir = arr                 # illuminated -> use, remember, count
+        self.ir_new_count += 1
+        return arr
 
     def close(self):
         self.stop_pump()
