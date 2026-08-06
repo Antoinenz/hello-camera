@@ -92,15 +92,18 @@ class SurfaceCameras:
     """
 
     def __init__(self, color: bool = True, ir: bool = True, max_color_width: int = 1280,
-                 hold_illuminated: bool = True):
+                 ir_mode: str = "active"):
         self.want_color = color
         self.want_ir = ir
         self.max_color_width = max_color_width
         # Windows Hello IR cameras strobe the emitter: frames alternate between
-        # illuminated (bright) and non-illuminated (near-black). When True, the
-        # dark frames are skipped and the last illuminated frame is held, which
-        # stabilises the live view and gives feature matching a usable image.
-        self.hold_illuminated = hold_illuminated
+        # illuminated (bright) and non-illuminated (ambient IR only). ir_mode:
+        #   "active"  - hold the emitter-lit frames (anti-flicker; default)
+        #   "passive" - hold the non-illuminated frames (ambient IR, no emitter
+        #               floodlight). The driver won't let us stop the emitter
+        #               firing, but this shows only the frames it didn't light.
+        #   "raw"     - no gating; the unfiltered strobing stream
+        self.ir_mode = ir_mode
         self._mc: MediaCapture | None = None
         self._color = _SourceRef("")
         self._ir = _SourceRef("")
@@ -133,7 +136,7 @@ class SurfaceCameras:
         if not self.want_ir:
             return None
         arr = self._read(self._ir, bitmap_to_gray)
-        if not self.hold_illuminated:
+        if self.ir_mode == "raw":
             if arr is not None:             # raw stream: every new frame counts
                 self.ir_new_count += 1
             return arr
@@ -153,9 +156,14 @@ class SurfaceCameras:
         self._ir_dark = min(m, 0.90 * self._ir_dark + 0.10 * m)
         contrast = self._ir_bright - self._ir_dark
         midpoint = 0.5 * (self._ir_bright + self._ir_dark)
-        if contrast > 0.25 * max(self._ir_bright, 1.0) and m < midpoint:
-            return self._last_ir            # dark strobe frame -> hold previous
-        self._last_ir = arr                 # illuminated -> use, remember, count
+        # gate whenever there's a real strobe, even a weak one (a few gray
+        # levels) - the emitter's contribution shrinks when ambient IR is high
+        if contrast > max(4.0, 0.06 * self._ir_bright):
+            is_bright = m >= midpoint
+            want_bright = self.ir_mode == "active"
+            if is_bright != want_bright:    # wrong strobe phase -> hold previous
+                return self._last_ir
+        self._last_ir = arr                 # wanted phase -> use, remember, count
         self.ir_new_count += 1
         return arr
 

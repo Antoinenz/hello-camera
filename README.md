@@ -48,9 +48,9 @@ The default viewer is a native Windows window with a **menu bar**:
 - **View → Aspect ratio** — **Fit** (letterbox, no crop), **Fill** (crop to fill),
   **Stretch** (ignore aspect). Default is *Fit*, so the video is never distorted.
 - **View → Show FPS overlay** — draw the live frame rate on the image
-- **View → Anti-flicker** — hold the last illuminated IR frame so the strobing
-  emitter doesn't make the IR view flicker (on by default; turn off to see the
-  raw alternating bright/dark frames)
+- **View → IR source** — which strobe phase to show (see *IR source* below):
+  **Active** (emitter, anti-flicker; default), **Passive** (ambient IR, emitter
+  excluded), or **Raw** (unfiltered strobe)
 - **Capture** — Snapshot, Start/Stop recording, Open captures folder
 - **Overlay** — **Auto-align** the IR onto the RGB feed, plus manual
   move / zoom / opacity for the fusion modes
@@ -78,9 +78,24 @@ convenient when it works, but cross-modal (near-IR vs visible) feature matching
 is inherently marginal — if it misses, just nudge it close by hand and press
 `E`. **Overlay → Auto-align (live)** keeps re-solving as you move.
 
-> The IR emitter *strobes*, so raw IR frames alternate bright/dark. The capture
-> layer detects and holds the last illuminated frame, which stabilises the live
-> view and gives auto-align a usable image.
+### IR source (emitter phase)
+
+The IR emitter *strobes*: frames alternate between **illuminated** (emitter on)
+and **non-illuminated** (ambient IR only). **View → IR source** picks which the
+app shows:
+
+- **Active** *(default)* — holds the illuminated frames. Steady, no flicker,
+  and what feeds auto-align.
+- **Passive** — holds the non-illuminated frames: what the IR sensor sees from
+  *ambient* light alone, with the emitter's floodlight excluded (good for
+  spotting IR light sources, sunlight, remote-control LEDs, etc.).
+- **Raw** — the unfiltered stream, so you see the raw bright/dark strobe.
+
+Note: this Surface's driver reports no `InfraredTorchControl` support, so the
+emitter can't actually be switched off in firmware — it still fires on alternate
+frames. *Passive* simply shows only the frames it didn't light, which looks like
+the emitter is off. In a dark room the passive view will be dim (no ambient IR
+to see by); it's brightest with sunlight or IR-rich lighting.
 
 ### Frame rate
 
@@ -131,6 +146,31 @@ depth to read. Two honest alternatives:
    *estimate* depth from the RGB image alone. It needs PyTorch (~2GB), so it is
    left as an opt-in dependency in `requirements.txt`.
 
+## IR transmit (proof-of-concept)
+
+You can't send *real* IR signals (TV-remote protocols, data) with this emitter:
+those need a modulated ~38kHz carrier with microsecond pulse timing, and the
+firmware gives us no per-pulse control — plus this device reports no
+`InfraredTorchControl`. The one thing we *can* control is the whole IR stream:
+starting it lights the emitter, stopping it dark. That's on-off keying at
+**~2-3 bits/sec** — useless for anything practical, but enough to blink a
+message. Purely for fun.
+
+```bash
+python scripts/ir_transmit.py "SOS"          # blink text as IR Morse
+python scripts/ir_transmit.py --unit 0.5 "HI"  # slower = easier to read
+```
+
+Point a phone camera at the IR emitter (phones see near-IR) to watch it flash.
+To decode a recording back to text:
+
+```bash
+python scripts/ir_receive.py clip.mp4        # tracks brightness -> Morse -> text
+```
+
+The encode/decode round-trip is verified end-to-end in software; the only
+analog link is your phone recording the blink.
+
 ## Layout
 
 ```
@@ -141,6 +181,8 @@ surfacecam/
   gui.py                    native Tkinter viewer with menu bar (default)
   app.py                    legacy OpenCV viewer (--cv)
 scripts/enumerate_sources.py  standalone source enumeration probe
+scripts/ir_transmit.py        blink a Morse message via the IR emitter (PoC)
+scripts/ir_receive.py         decode a phone recording of the blink back to text
 ```
 
 ## How it works

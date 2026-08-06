@@ -68,7 +68,7 @@ class ViewerGUI:
         self.statusbar_var = tk.BooleanVar(value=True)
         self.fps_var = tk.BooleanVar(value=True)
         self.autoalign_live_var = tk.BooleanVar(value=False)
-        self.antiflicker_var = tk.BooleanVar(value=self.cams.hold_illuminated)
+        self.ir_source_var = tk.StringVar(value=self.cams.ir_mode)
 
         self._build_menu()
         self._build_widgets()
@@ -100,9 +100,19 @@ class ViewerGUI:
 
         view.add_separator()
         view.add_checkbutton(label="Show FPS overlay", variable=self.fps_var)
-        view.add_checkbutton(label="Anti-flicker (hold IR illuminated frame)",
-                             variable=self.antiflicker_var,
-                             command=self._toggle_antiflicker)
+
+        ir_menu = tk.Menu(view, tearoff=0)
+        ir_menu.add_radiobutton(label="Active (emitter on, anti-flicker)",
+                                value="active", variable=self.ir_source_var,
+                                command=self._set_ir_source)
+        ir_menu.add_radiobutton(label="Passive (ambient IR, no emitter)",
+                                value="passive", variable=self.ir_source_var,
+                                command=self._set_ir_source)
+        ir_menu.add_radiobutton(label="Raw (unfiltered strobe)",
+                                value="raw", variable=self.ir_source_var,
+                                command=self._set_ir_source)
+        view.add_cascade(label="IR source", menu=ir_menu)
+
         view.add_checkbutton(label="Show status bar", variable=self.statusbar_var,
                              command=self._toggle_statusbar)
         view.add_command(label="Reset IR alignment", command=self._reset_align)
@@ -274,7 +284,7 @@ class ViewerGUI:
     def _draw_fps(self, disp):
         font = cv2.FONT_HERSHEY_SIMPLEX
         lines = [f"{self._fps:4.1f} FPS"]
-        if self.antiflicker_var.get():
+        if self._holding_phase():
             lines.append(f"IR {self._ir_fps:4.1f} fps")
         y = 0
         for i, txt in enumerate(lines):
@@ -307,7 +317,7 @@ class ViewerGUI:
         desc = dict(MODES)[self.mode_var.get()]
         rec = "  ● REC" if self.writer is not None else ""
         h, w = frame.shape[:2]
-        ir = f"   |   IR {self._ir_fps:4.1f} fps" if self.antiflicker_var.get() else ""
+        ir = f"   |   IR {self._ir_fps:4.1f} fps" if self._holding_phase() else ""
         self.status.config(
             text=f"{desc}   |   aspect: {self.aspect_var.get()}   |   "
                  f"src {w}x{h}   |   alpha {self.alpha:.2f}   |   "
@@ -402,10 +412,18 @@ class ViewerGUI:
         self.aligner = P.Aligner()
         self.alpha = 0.5
 
-    def _toggle_antiflicker(self):
-        self.cams.hold_illuminated = self.antiflicker_var.get()
-        state = "on" if self.antiflicker_var.get() else "off (raw strobed IR)"
-        self.status.config(text=f"anti-flicker {state}")
+    def _set_ir_source(self):
+        mode = self.ir_source_var.get()
+        self.cams.ir_mode = mode
+        labels = {"active": "active (emitter, anti-flicker)",
+                  "passive": "passive (ambient IR, emitter excluded)",
+                  "raw": "raw (unfiltered strobe)"}
+        self.status.config(text=f"IR source: {labels.get(mode, mode)}")
+
+    def _holding_phase(self) -> bool:
+        """True when IR is phase-gated (active/passive), so the 'IR fps' figure
+        reflects a distinct held-frame rate worth showing."""
+        return self.ir_source_var.get() != "raw"
 
     def _toggle_statusbar(self):
         if self.statusbar_var.get():
