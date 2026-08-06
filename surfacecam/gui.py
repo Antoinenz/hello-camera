@@ -103,6 +103,7 @@ class ViewerGUI:
         self.autopause_min_var = tk.BooleanVar(value=True)
         self.depth_method_var = tk.StringVar(value="auto")
         self.ml_model_var = tk.StringVar(value=ML_DEFAULT)
+        self.depth_alpha = 1.0          # depth-over-original blend (1=depth only)
         self.vcam_var = tk.BooleanVar(value=False)
         self.vcam = None
 
@@ -149,31 +150,6 @@ class ViewerGUI:
                                 command=self._set_ir_source)
         view.add_cascade(label="IR source", menu=ir_menu)
 
-        depth_menu = tk.Menu(view, tearoff=0)
-        depth_menu.add_radiobutton(
-            label="ML monocular (neural net)" if self.mldepth.available
-            else "ML monocular (run download_model.py first)",
-            value="ml", variable=self.depth_method_var)
-        depth_menu.add_radiobutton(label="Auto (stereo in good light, else IR)",
-                                   value="auto", variable=self.depth_method_var)
-        depth_menu.add_radiobutton(label="Stereo (RGB<->IR parallax)",
-                                   value="stereo", variable=self.depth_method_var)
-        depth_menu.add_radiobutton(label="Portrait (subject cutout + stereo)",
-                                   value="portrait", variable=self.depth_method_var)
-        depth_menu.add_radiobutton(
-            label="Calibrated (checkerboard stereo)" if self.stereo_calib
-            else "Calibrated (run stereo_calibrate.py first)",
-            value="calibrated", variable=self.depth_method_var)
-        depth_menu.add_radiobutton(label="Proximity (IR intensity)",
-                                   value="proximity", variable=self.depth_method_var)
-        view.add_cascade(label="Depth method", menu=depth_menu)
-
-        mlm = tk.Menu(view, tearoff=0)
-        for key, spec in ML_MODELS.items():
-            mlm.add_radiobutton(label=spec["label"], value=key,
-                                variable=self.ml_model_var, command=self._set_ml_model)
-        view.add_cascade(label="ML depth model", menu=mlm)
-
         view.add_checkbutton(label="Show status bar", variable=self.statusbar_var,
                              command=self._toggle_statusbar)
         view.add_command(label="Reset IR alignment", command=self._reset_align)
@@ -185,6 +161,44 @@ class ViewerGUI:
         view.add_separator()
         view.add_command(label="Exit", accelerator="Esc", command=self._on_close)
         menubar.add_cascade(label="View", menu=view)
+
+        # Depth  (the "Depth map" mode's settings)
+        depth = tk.Menu(menubar, tearoff=0)
+        method_menu = tk.Menu(depth, tearoff=0)
+        method_menu.add_radiobutton(
+            label="ML monocular (neural net)" if self.mldepth.available
+            else "ML monocular (run download_model.py first)",
+            value="ml", variable=self.depth_method_var)
+        method_menu.add_radiobutton(label="Auto (ML if available, else stereo/IR)",
+                                    value="auto", variable=self.depth_method_var)
+        method_menu.add_radiobutton(label="Stereo (RGB<->IR parallax)",
+                                    value="stereo", variable=self.depth_method_var)
+        method_menu.add_radiobutton(label="Portrait (subject cutout + stereo)",
+                                    value="portrait", variable=self.depth_method_var)
+        method_menu.add_radiobutton(
+            label="Calibrated (checkerboard stereo)" if self.stereo_calib
+            else "Calibrated (run stereo_calibrate.py first)",
+            value="calibrated", variable=self.depth_method_var)
+        method_menu.add_radiobutton(label="Proximity (IR intensity)",
+                                    value="proximity", variable=self.depth_method_var)
+        depth.add_cascade(label="Method", menu=method_menu)
+
+        mlm = tk.Menu(depth, tearoff=0)
+        for key, spec in ML_MODELS.items():
+            mlm.add_radiobutton(label=spec["label"], value=key,
+                                variable=self.ml_model_var, command=self._set_ml_model)
+        depth.add_cascade(label="ML model", menu=mlm)
+
+        depth.add_separator()
+        depth.add_command(label="More depth / less original", accelerator="+",
+                          command=lambda: self._set_depth_alpha(0.1))
+        depth.add_command(label="Less depth / more original", accelerator="-",
+                          command=lambda: self._set_depth_alpha(-0.1))
+        depth.add_command(label="Depth only",
+                          command=lambda: self._set_depth_alpha(1.0, True))
+        depth.add_command(label="Original only",
+                          command=lambda: self._set_depth_alpha(0.0, True))
+        menubar.add_cascade(label="Depth", menu=depth)
 
         # Capture
         cap = tk.Menu(menubar, tearoff=0)
@@ -436,6 +450,21 @@ class ViewerGUI:
         return color
 
     def _render_depth(self, color, ir):
+        heat, base = self._depth_and_base(color, ir)
+        if heat is None:
+            return None
+        if self.depth_alpha >= 0.999 or base is None:
+            return heat
+        if base.ndim == 2:
+            base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+        if base.shape[:2] != heat.shape[:2]:
+            base = cv2.resize(base, (heat.shape[1], heat.shape[0]))
+        return cv2.addWeighted(base, 1.0 - self.depth_alpha,
+                               heat, self.depth_alpha, 0.0)
+
+    def _depth_and_base(self, color, ir):
+        """Return (depth_colormap, original_image) so the two can be blended.
+        `base` is whatever image the depth was derived from (RGB or IR)."""
         method = self.depth_method_var.get()
         # ML monocular depth uses only the color image (no IR needed); auto
         # prefers it when the model is present.
@@ -445,42 +474,42 @@ class ViewerGUI:
             # depth still works (the net keys on structure, not colour)
             dark = color is None or P.depth_confidence(color) < 0.5
             if dark and ir is not None:
-                out = self.mldepth.depth_map(self.mldepth.ir_to_input(ir))
-                src = "IR"
+                base = self.mldepth.ir_to_input(ir)
+                out, src = self.mldepth.depth_map(base), "IR"
             elif color is not None:
-                out = self.mldepth.depth_map(color)
-                src = "RGB"
+                base = color
+                out, src = self.mldepth.depth_map(color), "RGB"
             else:
-                out = None
+                out, base = None, None
             if out is not None:
                 self._depth_note(f"ML {src} ({self.mldepth.device})")
-                return out
+                return out, base
         if want_ml and method == "ml" and not self.mldepth.available:
             self._depth_note(f"ML unavailable ({self.mldepth.error or 'no model'})"
                              " - run scripts/download_model.py")
         if want_ml:
             method = "auto"                     # fall back until model present
         if ir is None:
-            return None
+            return None, None
         # need a color frame for stereo/portrait; fall back to proximity without
         if method == "proximity" or color is None:
             self._depth_note("proximity")
-            return P.proximity_map(ir)
+            return P.proximity_map(ir), P.ir_view(ir)
         if method == "auto" and P.depth_confidence(color) < 0.5:
             self._depth_note("auto: proximity (too dark for stereo)")
-            return P.proximity_map(ir)      # too dark for stereo -> IR intensity
+            return P.proximity_map(ir), P.ir_view(ir)
         if method == "calibrated":
             if self.stereo_calib is not None:
                 self._depth_note("calibrated stereo")
-                return P.calibrated_depth(color, ir, self.stereo_calib)
+                return P.calibrated_depth(color, ir, self.stereo_calib), color
             self._depth_note("calibrated: no calibration - run stereo_calibrate.py")
             method = "stereo"                   # fall back until calibrated
         aligned = self.aligner.warp_ir_to_color(ir, color.shape)
         if method == "portrait":
             self._depth_note("portrait")
-            return P.portrait_depth(color, aligned)
+            return P.portrait_depth(color, aligned), color
         self._depth_note("stereo" if method == "stereo" else "auto: stereo")
-        return P.stereo_depth(color, aligned)
+        return P.stereo_depth(color, aligned), color
 
     def _depth_note(self, note):
         self._depth_active = note        # shown in the status bar (see _update_status)
@@ -610,7 +639,18 @@ class ViewerGUI:
                 self.status.config(text=f"alignment saved to {self.calib_path}")
 
     def _set_alpha(self, d):
-        self.alpha = float(min(1.0, max(0.0, self.alpha + d)))
+        # +/- means "opacity of the overlay for the current mode": depth blend
+        # in the Depth map mode, IR-fusion opacity in the fusion modes
+        if self.mode_var.get() == "proximity":
+            self._set_depth_alpha(d)
+        else:
+            self.alpha = float(min(1.0, max(0.0, self.alpha + d)))
+
+    def _set_depth_alpha(self, d, absolute=False):
+        self.depth_alpha = float(d if absolute else self.depth_alpha + d)
+        self.depth_alpha = min(1.0, max(0.0, self.depth_alpha))
+        self.status.config(text=f"depth opacity: {int(self.depth_alpha * 100)}% "
+                                f"depth / {int((1 - self.depth_alpha) * 100)}% original")
 
     def _auto_align_once(self):
         # Cross-modal matching is marginal on any single frame, so collect a
@@ -749,7 +789,8 @@ class ViewerGUI:
             "               (auto-saved; reloads next launch)\n"
             "Refine align: E  (ECC polish of the current alignment)\n"
             "Auto-align:   A  (best-effort feature match, then refine)\n"
-            "Opacity:      + / -\n"
+            "Opacity:      + / -  (fusion IR overlay, or depth-vs-original\n"
+            "               blend in the Depth map mode)\n"
             "Snapshot:     Ctrl+S\n"
             "Record:       Ctrl+R\n"
             "Freeze:       Space  (cameras power down if held >10s)\n"

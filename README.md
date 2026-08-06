@@ -201,6 +201,11 @@ offers several estimators:
   downloaded, otherwise stereo in good light and proximity in low light (where
   the color sensor goes near-black). The status bar shows which is active.
 
+All depth settings live in the **Depth** menu (method, ML model, opacity).
+**Depth opacity** (`+` / `-` in the Depth map mode, or Depth → More/Less)
+blends the depth colouring over the original image, so you can dial in anywhere
+from 100% depth to 100% original.
+
 ### Stereo calibration (for the Calibrated method)
 
 ```bash
