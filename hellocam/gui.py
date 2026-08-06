@@ -1,4 +1,4 @@
-"""Native-windowed viewer (Tkinter) for the Surface RGB + IR cameras.
+"""Native-windowed viewer (Tkinter) for the Windows Hello RGB + IR cameras.
 
 Uses a real Windows menu bar for all controls:
   View    -> Mode (IR / RGB / fusion / ...) and Aspect (Fit / Fill / Stretch)
@@ -6,12 +6,13 @@ Uses a real Windows menu bar for all controls:
   Overlay -> live IR<->RGB alignment for the fusion modes
   Help    -> controls & about
 
-The camera/processing core (surfacecam.capture / .processing) is reused
+The camera/processing core (hellocam.capture / .processing) is reused
 unchanged; only the front-end differs from the OpenCV viewer.
 """
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime
 
@@ -21,9 +22,10 @@ import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 
-from .capture import SurfaceCameras
+from .capture import HelloCameras
 from . import processing as P
-from .mldepth import MLDepth, MODELS as ML_MODELS, DEFAULT_MODEL as ML_DEFAULT
+from .mldepth import (MLDepth, MODELS as ML_MODELS, DEFAULT_MODEL as ML_DEFAULT,
+                      download_model as ml_download)
 
 try:
     import pyvirtualcam
@@ -63,7 +65,7 @@ class ViewerGUI:
         self._calib_tried = False
         self.stereo_calib = P.load_stereo_calib("captures/stereo_calib.npz")
         self.mldepth = MLDepth(ML_DEFAULT)
-        self.cams = SurfaceCameras(color=True, ir=True)
+        self.cams = HelloCameras(color=True, ir=True)
         self.aligner = P.Aligner()
         self.alpha = 0.5
         self.writer = None
@@ -88,7 +90,7 @@ class ViewerGUI:
         self._last_power_t = 0.0        # throttle power checks (root.state is slow)
 
         self.root = tk.Tk()
-        self.root.title("SurfaceCam - RGB + IR")
+        self.root.title("HelloCam - RGB + IR")
         self.root.geometry("980x680")
         self.root.minsize(320, 240)
         self.root.configure(bg="black")
@@ -191,6 +193,8 @@ class ViewerGUI:
             mlm.add_radiobutton(label=spec["label"], value=key,
                                 variable=self.ml_model_var, command=self._set_ml_model)
         depth.add_cascade(label="ML model", menu=mlm)
+        depth.add_command(label="Download selected ML model (~100MB)",
+                          command=self._download_ml_model)
 
         depth.add_separator()
         depth.add_command(label="More depth / less original", accelerator="+",
@@ -527,7 +531,37 @@ class ViewerGUI:
         else:
             self.status.config(
                 text=f"ML model '{key}' not downloaded - "
-                     f"run: python scripts/download_model.py {key}")
+                     f"Depth > Download selected ML model")
+
+    def _download_ml_model(self):
+        """Fetch the selected model on a background thread (keeps the UI live).
+        This is the exe-friendly path: no need for the download_model.py script."""
+        if getattr(self, "_ml_downloading", False):
+            return
+        key = self.ml_model_var.get()
+        if self.mldepth.available and key == self.mldepth.key:
+            self.status.config(text=f"ML model already downloaded: "
+                                    f"{ML_MODELS[key]['label']}")
+            return
+        self._ml_downloading = True
+        self.status.config(text=f"downloading {ML_MODELS[key]['label']}... "
+                                f"(~100MB, this can take a minute)")
+
+        def worker():
+            try:
+                ml_download(key)
+                msg, ok = f"downloaded {ML_MODELS[key]['label']} - ready", True
+            except Exception as e:                       # network/disk error
+                msg, ok = f"download failed: {e}", False
+            self.root.after(0, lambda: self._on_ml_downloaded(key, ok, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ml_downloaded(self, key, ok, msg):
+        self._ml_downloading = False
+        if ok and self.ml_model_var.get() == key:
+            self.mldepth.set_model(key)                  # reload so it's picked up
+        self.status.config(text=msg)
 
     def _show(self, frame):
         if self.mirror_var.get():
@@ -808,8 +842,8 @@ class ViewerGUI:
 
     def _show_about(self):
         messagebox.showinfo(
-            "About SurfaceCam",
-            "SurfaceCam - RGB + IR viewer for the Surface Windows Hello camera.\n\n"
+            "About HelloCam",
+            "HelloCam - RGB + IR viewer for the Windows Hello camera.\n\n"
             "Reads the COLOR and INFRARED sensors via the WinRT Media Frame\n"
             "Source API. No dedicated depth sensor, so depth is either an\n"
             "IR-intensity proximity proxy or RGB<->IR stereo parallax\n"

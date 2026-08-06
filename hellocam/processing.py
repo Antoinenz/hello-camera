@@ -1,6 +1,6 @@
 """Frame processing: IR visualisation, RGB+IR fusion, and a proximity map.
 
-Note on "depth": the Surface Hello camera has no depth sensor, so none of
+Note on "depth": the Windows Hello camera has no depth sensor, so none of
 this is metric depth. `proximity_map` uses IR flood intensity as a rough
 closeness proxy (brighter ~ nearer, because IR illumination falls off with
 distance). It is clearly labelled as such in the UI.

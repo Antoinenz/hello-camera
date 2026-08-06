@@ -1,15 +1,33 @@
-# SurfaceCam — Windows Hello RGB + IR viewer
+# HelloCam — Windows Hello RGB + IR viewer
 
-View and fuse the two cameras inside a Surface Laptop's Windows Hello module:
-the normal **RGB webcam** and the **near-infrared (IR)** sensor that Hello uses
-for face unlock. The IR sensor is not visible to DirectShow apps (ffmpeg, OBS,
-the Camera app) — it lives on the modern **MediaFoundation / Media Frame Source**
-API, which this project drives from Python via the `winsdk` WinRT projection.
+View and fuse the two cameras inside a **Windows Hello** module: the normal
+**RGB webcam** and the **near-infrared (IR)** sensor that Hello uses for face
+unlock. The IR sensor is not visible to DirectShow apps (ffmpeg, OBS, the Camera
+app) — it lives on the modern **MediaFoundation / Media Frame Source** API,
+which this project drives from Python via the `winsdk` WinRT projection.
+
+On top of the raw feeds it does live RGB↔IR fusion, edge overlays, a virtual
+camera, IR Morse blinking, and several depth-map estimators — including a small
+neural net that produces genuinely good monocular depth, in the dark too.
 
 Nothing here bypasses a security control. Windows exposes these sources to
 normal apps by design; it only reserves the IR stream momentarily while Hello is
 mid-authentication. This tool just *reads* the sensors — it does **not** feed
 frames back to spoof Hello.
+
+## Compatibility
+
+Works with **any Windows Hello IR camera** — the code selects sensors generically
+by kind (`COLOR` / `INFRARED`) via the Media Frame Source API, with no hardcoded
+device IDs. Developed and tested on a **Surface Laptop 5**; other Hello laptops
+and external Hello webcams should work too. Two device-dependent caveats:
+
+- The IR **strobe/anti-flicker** timing is tuned to the Surface's ~60fps
+  alternating emitter pattern; on other hardware the *Active*/*Passive* phase
+  split may need retuning (the **Raw** IR source always works regardless).
+- Whether the emitter can be excluded (*Passive*) depends on the driver.
+
+Requires Windows 10/11 and Python 3.10–3.12.
 
 ## Features
 
@@ -23,10 +41,22 @@ frames back to spoof Hello.
 - **IR edges** — Canny edges of the IR frame
 - Snapshot to PNG and record to MP4
 
-## Install
+## Download (prebuilt)
+
+Grab the latest **`HelloCam.exe`** from the
+[Releases](https://github.com/Antoinenz/hello-camera/releases) page — a
+standalone Windows build, no Python needed. Double-click to launch the viewer.
+(For ML depth, grab the model in-app once via **Depth → Download selected ML
+model**; see *Depth* below.)
+
+Windows SmartScreen may warn on first run since the build isn't code-signed —
+*More info → Run anyway*.
+
+## Install (from source)
 
 ```bash
 pip install -r requirements.txt
+python main.py
 ```
 
 Requires Windows with a Hello IR camera and Python 3.10–3.12.
@@ -48,6 +78,8 @@ The default viewer is a native Windows window with a **menu bar**:
 - **View → Aspect ratio** — **Fit** (letterbox, no crop), **Fill** (crop to fill),
   **Stretch** (ignore aspect). Default is *Fit*, so the video is never distorted.
 - **View → Show FPS overlay** — draw the live frame rate on the image
+- **View → Mirror** (**M**) — flip horizontally for a selfie-style view (applies
+  to the preview and the virtual-camera output)
 - **View → IR source** — which strobe phase to show (see *IR source* below):
   **Active** (emitter, anti-flicker; default), **Passive** (ambient IR, emitter
   excluded), or **Raw** (unfiltered strobe)
@@ -111,7 +143,7 @@ app shows:
   spotting IR light sources, sunlight, remote-control LEDs, etc.).
 - **Raw** — the unfiltered stream, so you see the raw bright/dark strobe.
 
-Note: this Surface's driver reports no `InfraredTorchControl` support, so the
+Note: on the Surface (and many Hello devices) the driver reports no `InfraredTorchControl` support, so the
 emitter can't actually be switched off in firmware — it still fires on alternate
 frames. *Passive* simply shows only the frames it didn't light, which looks like
 the emitter is off. In a dark room the passive view will be dim (no ambient IR
@@ -124,7 +156,7 @@ maximum; there is no higher-rate format to request. Getting the app to actually
 run near that rate came down to three things (all CPU — the work is light enough
 that GPU offload isn't needed and would only add transfer overhead):
 
-1. **Background capture pump** (`SurfaceCameras.start_pump`) pulls frames on a
+1. **Background capture pump** (`HelloCameras.start_pump`) pulls frames on a
    thread so the sensor runs full-speed independently of rendering.
 2. **Fast fusion** — the RGB+IR blend uses OpenCV SIMD `addWeighted` +
    `cv2.copyTo` instead of full-frame float math (≈48ms → ≈1.5ms per frame).
@@ -141,6 +173,7 @@ Keyboard shortcuts mirror the menus:
 |-----|--------|
 | `1`–`7` | switch mode |
 | `F` / `L` / `T` | aspect Fit / Fill / Stretch |
+| `M` | mirror (flip horizontally) |
 | `A` | auto-align IR to RGB |
 | arrows | nudge the IR overlay alignment |
 | `[` `]` | scale the IR overlay |
@@ -153,14 +186,15 @@ Output files go to `captures/`.
 
 ## Depth
 
-The Surface Hello camera has no dedicated depth sensor (no time-of-flight), so
-there's no *metric* depth to read. The **Depth map** mode (`View → Depth method`)
+The Windows Hello camera has no dedicated depth sensor (no time-of-flight), so
+there's no *metric* depth to read. The **Depth map** mode (`Depth → Method`)
 offers several estimators:
 
 - **ML monocular (neural net)** — **the best-looking by far, and recommended.**
   A small MiDaS network predicts depth from a single frame using learned
   monocular cues — no calibration, no stereo matching. Clean silhouettes, smooth
-  gradients, correct near/far. Needs a one-time model download (~66MB):
+  gradients, correct near/far. Needs a one-time model download: in-app via
+  **Depth → Download selected ML model**, or from source with
   `python scripts/download_model.py`. Details:
   - **GPU-accelerated** via ONNX Runtime DirectML (any Windows GPU, incl. Intel
     Iris Xe) — ~23ms/frame on GPU vs ~130ms on CPU, and it keeps the CPU free.
@@ -170,7 +204,7 @@ offers several estimators:
     net keys on structure, not colour), so you still get depth. The status bar
     shows `ML RGB` or `ML IR`. The IR camera powers down in good light and back
     on in the dark.
-  - **Two models** (`View → ML depth model`): *MiDaS small* (fast, ~37ms) is the
+  - **Two models** (`Depth → ML model`): *MiDaS small* (fast, ~37ms) is the
     default; *Depth Anything V2* (`~130ms`, ~8fps) is noticeably sharper. Grab
     both with `python scripts/download_model.py`.
 - **Stereo (parallax)** — the color and IR sensors sit a few cm apart (a real
@@ -258,7 +292,7 @@ analog link is your phone recording the blink.
 
 ```
 main.py                     entry point / CLI
-surfacecam/
+hellocam/
   capture.py                MediaFrameSource wrapper (RGB + IR -> numpy)
   processing.py             colormaps, fusion, proximity, alignment, aspect
   gui.py                    native Tkinter viewer with menu bar (default)

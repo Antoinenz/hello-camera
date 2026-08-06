@@ -6,7 +6,7 @@
 import sys
 
 sys.path.insert(0, __file__.rsplit("scripts", 1)[0])
-from surfacecam import mldepth               # noqa: E402
+from hellocam import mldepth               # noqa: E402
 
 
 def main():

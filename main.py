@@ -1,4 +1,4 @@
-"""SurfaceCam - view and fuse the Surface Windows Hello RGB + IR cameras.
+"""HelloCam - view and fuse the Windows Hello RGB + IR cameras.
 
 Examples:
     python main.py                 # launch the live multi-mode viewer
@@ -25,17 +25,35 @@ def cmd_enumerate():
     asyncio.run(_run())
 
 
+def cmd_check():
+    """Import the heavy modules and exit. Used by CI to confirm a packaged
+    build's import graph is intact, without needing a camera or Media
+    Foundation (which isn't present on headless Windows Server runners)."""
+    import cv2                                              # noqa: F401
+    import numpy                                            # noqa: F401
+    from winsdk.windows.media.capture.frames import (       # noqa: F401
+        MediaFrameSourceGroup)
+    import hellocam                                         # noqa: F401
+    try:
+        import onnxruntime                                  # noqa: F401
+        ort = "yes"
+    except Exception:
+        ort = "no"
+    print(f"imports OK (onnxruntime available: {ort})", flush=True)
+    return 0
+
+
 def cmd_selftest():
     """Open both cameras, grab a few frames, save PNGs. Headless (no window)."""
     import os
     import time
     import cv2
-    from surfacecam import SurfaceCameras
-    from surfacecam import processing as P
+    from hellocam import HelloCameras
+    from hellocam import processing as P
 
     out = "captures"
     os.makedirs(out, exist_ok=True)
-    cams = SurfaceCameras(color=True, ir=True)
+    cams = HelloCameras(color=True, ir=True)
     print("Opening cameras...", flush=True)
     cams.open()
     print(f"  color size: {cams.color_size}", flush=True)
@@ -81,10 +99,14 @@ def main():
                     help="open cameras, save sample frames, exit (no GUI)")
     ap.add_argument("--enumerate", action="store_true",
                     help="list media frame sources and exit")
+    ap.add_argument("--check", action="store_true",
+                    help="import core modules and exit (build sanity check)")
     ap.add_argument("--cv", action="store_true",
                     help="use the legacy OpenCV window instead of the native GUI")
     args = ap.parse_args()
 
+    if args.check:
+        return cmd_check()
     if args.enumerate:
         cmd_enumerate()
         return 0
@@ -92,9 +114,9 @@ def main():
         return cmd_selftest()
 
     if args.cv:
-        from surfacecam.app import run
+        from hellocam.app import run
     else:
-        from surfacecam.gui import run
+        from hellocam.gui import run
     run()
     return 0
 

@@ -1,4 +1,4 @@
-"""Access the Surface's Windows Hello camera module (RGB + IR) via the
+"""Access a Windows Hello camera module (RGB + IR) via the
 Windows MediaFoundation / Media Frame Source API (WinRT, through `winsdk`).
 
 The Hello module exposes two sensors on one physical USB device:
@@ -80,11 +80,11 @@ class _SourceRef:
     reader: object = None
 
 
-class SurfaceCameras:
+class HelloCameras:
     """Synchronous facade over the async WinRT camera API.
 
     Usage:
-        cams = SurfaceCameras(color=True, ir=True)
+        cams = HelloCameras(color=True, ir=True)
         cams.open()
         bgr = cams.read_color()   # HxWx3 uint8 or None
         ir  = cams.read_ir()      # HxW  uint8 or None

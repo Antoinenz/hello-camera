@@ -1,4 +1,4 @@
-"""Interactive multi-mode viewer for the Surface RGB + IR cameras."""
+"""Interactive multi-mode viewer for the Windows Hello RGB + IR cameras."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-from .capture import SurfaceCameras
+from .capture import HelloCameras
 from . import processing as P
 
 MODES = [
@@ -29,14 +29,14 @@ HELP = [
 
 class ViewerApp:
     def __init__(self, out_dir: str = "captures"):
-        self.cams = SurfaceCameras(color=True, ir=True)
+        self.cams = HelloCameras(color=True, ir=True)
         self.mode = 0
         self.alpha = 0.5
         self.aligner = P.Aligner()
         self.show_help = True
         self.out_dir = out_dir
         self.writer = None
-        self.win = "SurfaceCam - RGB + IR"
+        self.win = "HelloCam - RGB + IR"
 
     # ------------------------------------------------------------------
     def run(self):

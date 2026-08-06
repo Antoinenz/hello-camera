@@ -1,4 +1,4 @@
-"""Proof-of-concept IR transmitter using the Surface Hello emitter.
+"""Proof-of-concept IR transmitter using the Windows Hello IR emitter.
 
 We can't control the emitter's individual pulses (the firmware strobes it and
 Windows exposes no timing API), so this does the one thing we *can*: gate the

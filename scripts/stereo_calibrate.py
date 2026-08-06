@@ -1,4 +1,4 @@
-"""One-time stereo calibration of the Surface RGB + IR pair.
+"""One-time stereo calibration of the Windows Hello RGB + IR pair.
 
 This is the "true quality" depth path: with a proper checkerboard calibration
 we can rectify the two views so epipolar lines are horizontal and run real
@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, __file__.rsplit("scripts", 1)[0])
-from surfacecam import SurfaceCameras          # noqa: E402
+from hellocam import HelloCameras          # noqa: E402
 
 CALIB_W, CALIB_H = 640, 480                     # common resolution for both cams
 
@@ -60,7 +60,7 @@ def main():
     objp *= args.square_mm
 
     objpoints, cpts, ipts = [], [], []
-    cams = SurfaceCameras(color=True, ir=True)
+    cams = HelloCameras(color=True, ir=True)
     cams.open(); cams.start_pump()
     print(f"Collecting {args.need} checkerboard pairs ({args.cols}x{args.rows}). "
           f"Move the board around; Ctrl+C to stop early.\n")

@@ -1,6 +1,6 @@
 """Decode an IR-Morse transmission (from scripts/ir_transmit.py) out of a video.
 
-The transmitter blinks the Surface IR emitter via stream gating. Record that
+The transmitter blinks the Windows Hello IR emitter via stream gating. Record that
 blinking emitter with a phone camera (phones see near-IR), then feed the clip
 here: it tracks the brightest region's intensity over time, thresholds it to
 on/off, segments by the Morse timing, and prints the decoded text.
