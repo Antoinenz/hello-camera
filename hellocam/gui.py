@@ -12,6 +12,7 @@ unchanged; only the front-end differs from the OpenCV viewer.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from datetime import datetime
@@ -34,6 +35,13 @@ except Exception:
     HAVE_VCAM = False
 
 VCAM_W, VCAM_H, VCAM_FPS = 1280, 720, 30
+
+
+def _asset(name: str) -> str:
+    """Path to a bundled asset, working both from source and from a frozen
+    PyInstaller build (where data is unpacked under sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__)))
+    return os.path.join(base, "hellocam", "assets", name)
 
 MODES = [
     ("ir",        "IR (raw grayscale)"),
@@ -94,6 +102,7 @@ class ViewerGUI:
         self.root.geometry("980x680")
         self.root.minsize(320, 240)
         self.root.configure(bg="black")
+        self._set_window_icon()
 
         # tk vars driving the menus
         self.mode_var = tk.StringVar(value=MODES[0][0])
@@ -113,6 +122,19 @@ class ViewerGUI:
         self._build_menu()
         self._build_widgets()
         self._bind_keys()
+
+    def _set_window_icon(self):
+        """Set the title-bar / taskbar icon. Never fatal if the asset is
+        missing (e.g. running from an odd cwd)."""
+        try:
+            self.root.iconbitmap(default=_asset("icon.ico"))
+        except Exception:
+            try:                                    # fallback via PIL/PhotoImage
+                self._icon_img = ImageTk.PhotoImage(
+                    Image.open(_asset("icon.ico")))
+                self.root.iconphoto(True, self._icon_img)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def _build_menu(self):

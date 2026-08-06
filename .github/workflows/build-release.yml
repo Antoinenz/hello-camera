@@ -35,6 +35,8 @@ jobs:
         # dynamically, so collect them wholesale or PyInstaller misses them.
         run: >
           pyinstaller --onefile --windowed --name HelloCam
+          --icon hellocam/assets/icon.ico
+          --add-data "hellocam/assets/icon.ico;hellocam/assets"
           --collect-all winsdk
           --collect-all onnxruntime
           --collect-all pyvirtualcam
