@@ -158,11 +158,18 @@ there's no *metric* depth to read. The **Depth map** mode (`View → Depth metho
 offers several estimators:
 
 - **ML monocular (neural net)** — **the best-looking by far, and recommended.**
-  A small MiDaS network (ONNX Runtime, CPU, ~30ms) predicts depth from a single
-  RGB frame using learned monocular cues — no calibration, no IR, no stereo
-  matching. Clean silhouettes, smooth gradients, correct near/far. Needs a
-  one-time model download (~66MB): `python scripts/download_model.py`. Uses only
-  the color camera, so the IR emitter powers down in this mode.
+  A small MiDaS network predicts depth from a single frame using learned
+  monocular cues — no calibration, no stereo matching. Clean silhouettes, smooth
+  gradients, correct near/far. Needs a one-time model download (~66MB):
+  `python scripts/download_model.py`. Details:
+  - **GPU-accelerated** via ONNX Runtime DirectML (any Windows GPU, incl. Intel
+    Iris Xe) — ~23ms/frame on GPU vs ~130ms on CPU, and it keeps the CPU free.
+    Falls back to CPU automatically. The status bar shows `(GPU)` or `(CPU)`.
+  - **Works in the dark**: in good light it runs on the RGB frame; when the
+    color sensor goes dark it automatically feeds the **IR** frame instead (the
+    net keys on structure, not colour), so you still get depth. The status bar
+    shows `ML RGB` or `ML IR`. The IR camera powers down in good light and back
+    on in the dark.
 - **Stereo (parallax)** — the color and IR sensors sit a few cm apart (a real
   stereo baseline), so their views disagree by an amount that depends on
   distance. After the IR is aligned onto the

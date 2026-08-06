@@ -3,7 +3,11 @@ numpy>=1.24
 opencv-python>=4.8
 Pillow>=10.0        # image display in the native Tkinter GUI
 pyvirtualcam>=0.10  # optional: "Send to virtual camera" (needs OBS installed)
-onnxruntime>=1.15   # optional: ML monocular depth (Depth method > ML)
+# optional: ML monocular depth (Depth method > ML).
+# On Windows, prefer the DirectML build for GPU offload (any GPU, incl. Intel):
+#   pip install onnxruntime-directml
+# Otherwise the CPU build works too:  pip install onnxruntime
+onnxruntime-directml>=1.15
 
 # Optional: ML monocular depth estimation (large download, ~2GB).
 # Uncomment and `pip install -r requirements.txt` to enable the future

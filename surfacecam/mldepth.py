@@ -45,12 +45,27 @@ class MLDepth:
         self._sess = None
         self._in = None
         self.error = None
+        self.provider = None            # active execution provider once loaded
         if not HAVE_ORT:
             self.error = "onnxruntime not installed (pip install onnxruntime)"
+
+    @staticmethod
+    def ir_to_input(ir_gray: np.ndarray) -> np.ndarray:
+        """Turn an IR frame into a 3-channel image the RGB-trained net accepts.
+        The net keys on structure/perspective, not colour, so IR works - which
+        gives depth in the dark, where the colour camera is black."""
+        g = cv2.normalize(ir_gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        g = cv2.createCLAHE(2.0, (8, 8)).apply(g)
+        return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
 
     @property
     def available(self) -> bool:
         return HAVE_ORT and os.path.exists(self.model_path)
+
+    @property
+    def device(self) -> str:
+        return "GPU" if self.provider and self.provider != "CPUExecutionProvider" \
+            else "CPU"
 
     def _ensure(self) -> bool:
         if self._sess is not None:
@@ -60,9 +75,13 @@ class MLDepth:
         if not os.path.exists(self.model_path):
             self.error = f"model missing - run scripts/download_model.py"
             return False
-        self._sess = ort.InferenceSession(
-            self.model_path, providers=["CPUExecutionProvider"])
+        # prefer the GPU (DirectML: any Windows GPU) and fall back to CPU
+        provs = ort.get_available_providers()
+        order = [p for p in ("DmlExecutionProvider", "CUDAExecutionProvider",
+                             "CPUExecutionProvider") if p in provs]
+        self._sess = ort.InferenceSession(self.model_path, providers=order)
         self._in = self._sess.get_inputs()[0].name
+        self.provider = self._sess.get_providers()[0]
         return True
 
     def infer(self, color_bgr: np.ndarray) -> np.ndarray | None:

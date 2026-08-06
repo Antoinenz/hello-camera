@@ -373,7 +373,9 @@ class ViewerGUI:
             dm = self.depth_method_var.get()
             uses_ml = dm == "ml" or (dm == "auto" and self.mldepth.available)
             if uses_ml:
-                need_c, need_i = True, False    # ML uses only the color image
+                need_c = True                   # ML runs on the color image...
+                col = self.cams.latest_color()  # ...but on IR when it's dark
+                need_i = col is None or P.depth_confidence(col) < 0.5
             elif dm != "proximity":
                 need_c = True                   # stereo/portrait/calibrated need both
         now = time.time()
@@ -431,16 +433,25 @@ class ViewerGUI:
         # ML monocular depth uses only the color image (no IR needed); auto
         # prefers it when the model is present.
         want_ml = method == "ml" or (method == "auto" and self.mldepth.available)
-        if want_ml:
-            if color is None:
-                return None
-            out = self.mldepth.depth_map(color) if self.mldepth.available else None
+        if want_ml and self.mldepth.available:
+            # use RGB in good light; in the dark feed the IR frame instead so
+            # depth still works (the net keys on structure, not colour)
+            dark = color is None or P.depth_confidence(color) < 0.5
+            if dark and ir is not None:
+                out = self.mldepth.depth_map(self.mldepth.ir_to_input(ir))
+                src = "IR"
+            elif color is not None:
+                out = self.mldepth.depth_map(color)
+                src = "RGB"
+            else:
+                out = None
             if out is not None:
-                self._depth_note("ML monocular" if method == "ml" else "auto: ML")
+                self._depth_note(f"ML {src} ({self.mldepth.device})")
                 return out
-            if method == "ml":
-                self._depth_note(f"ML unavailable ({self.mldepth.error or 'no model'})"
-                                 " - run scripts/download_model.py")
+        if want_ml and method == "ml" and not self.mldepth.available:
+            self._depth_note(f"ML unavailable ({self.mldepth.error or 'no model'})"
+                             " - run scripts/download_model.py")
+        if want_ml:
             method = "auto"                     # fall back until model present
         if ir is None:
             return None
