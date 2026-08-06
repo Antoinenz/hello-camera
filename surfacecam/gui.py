@@ -314,11 +314,8 @@ class ViewerGUI:
                     self._show_badge("FROZEN")
                 self.status.config(text=f"{reason} - paused")
             elif not self._cams_off and now - self._pause_since > grace:
-                self.cams.suspend()             # power cameras down
+                self.cams.suspend()             # power cameras down (silently)
                 self._cams_off = True
-                if reason == "frozen":
-                    self._show_badge("FROZEN - cameras off")
-                self.status.config(text=f"{reason} - cameras off to save power")
             return True
         # not paused: resume if we were
         if self._pause_since is not None:
