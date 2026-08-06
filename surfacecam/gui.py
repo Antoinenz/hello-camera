@@ -53,6 +53,7 @@ class ViewerGUI:
         self._ir_last_t = time.time()
         self._frame_i = 0
         self._last_ver = -1
+        self._save_after_id = None      # debounce for auto-saving manual nudges
         self._photo = None  # keep a ref so Tk doesn't GC the image
 
         self.root = tk.Tk()
@@ -122,9 +123,13 @@ class ViewerGUI:
 
         # Overlay (fusion alignment)
         ov = tk.Menu(menubar, tearoff=0)
-        ov.add_command(label="Auto-align now", accelerator="A",
+        ov.add_command(label="Auto-align (find)", accelerator="A",
                        command=self._auto_align_once)
+        ov.add_command(label="Refine alignment (ECC)", accelerator="E",
+                       command=self._refine_once)
         ov.add_checkbutton(label="Auto-align (live)", variable=self.autoalign_live_var)
+        ov.add_separator()
+        ov.add_command(label="Save alignment", command=self._save_current_calib)
         ov.add_separator()
         ov.add_command(label="Nudge left", accelerator="Left",
                        command=lambda: self._nudge(dx=-4))
@@ -182,6 +187,8 @@ class ViewerGUI:
         r.bind("<Control-r>", lambda e: self._toggle_record())
         r.bind("a", lambda e: self._auto_align_once())
         r.bind("A", lambda e: self._auto_align_once())
+        r.bind("e", lambda e: self._refine_once())
+        r.bind("E", lambda e: self._refine_once())
         r.bind("<Escape>", lambda e: self._on_close())
         r.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -315,6 +322,20 @@ class ViewerGUI:
 
     def _nudge(self, dx=0, dy=0, dscale=0.0):
         self.aligner.nudge(dx=dx, dy=dy, dscale=dscale)
+        self._schedule_save()   # persist hand alignment (debounced)
+
+    def _schedule_save(self):
+        if self._save_after_id is not None:
+            self.root.after_cancel(self._save_after_id)
+        self._save_after_id = self.root.after(1200, self._save_current_calib)
+
+    def _save_current_calib(self):
+        self._save_after_id = None
+        ir = self.cams.latest_ir()
+        color = self.cams.latest_color()
+        if ir is not None and color is not None and self.aligner.M is not None:
+            if self.aligner.save(self.calib_path, ir.shape, color.shape):
+                self.status.config(text=f"alignment saved to {self.calib_path}")
 
     def _set_alpha(self, d):
         self.alpha = float(min(1.0, max(0.0, self.alpha + d)))
@@ -339,16 +360,37 @@ class ViewerGUI:
             return
         info = self.aligner.auto_align_pooled(pairs)
         if info.get("ok"):
+            # polish the sparse-feature solve with photometric ECC
+            self.aligner.refine_ecc(pairs[-1][0], pairs[-1][1])
             self._save_calib(pairs[-1][0], pairs[-1][1])
             self.status.config(
-                text=f"auto-align OK: {info['inliers']}/{info['matches']} inliers "
-                     f"over {info['frames']} frames, scale {info['scale']:.2f}  "
-                     f"(saved; use a fusion mode to see it)")
+                text=f"auto-align OK: {info['inliers']}/{info['matches']} inliers, "
+                     f"scale {info['scale']:.2f}, refined + saved  "
+                     f"(use a fusion mode to see it)")
         else:
             self.status.config(
-                text=f"auto-align failed ({info.get('reason', '?')}, "
-                     f"{info.get('matches', 0)} matches) - face the camera with a "
-                     f"textured background and try again")
+                text=f"auto-align failed ({info.get('reason', '?')}) - it's marginal "
+                     f"cross-modal; align roughly by hand (arrows/[ ]) then press E "
+                     f"to refine")
+
+    def _refine_once(self):
+        ir = self.cams.latest_ir()
+        color = self.cams.latest_color()
+        if ir is None or color is None:
+            self.status.config(text="refine: need both cameras streaming")
+            return
+        self.status.config(text="refining alignment...")
+        self.root.update_idletasks()
+        r = self.aligner.refine_ecc(ir, color)
+        if r.get("ok"):
+            self._save_calib(ir, color)
+            self.status.config(
+                text=f"alignment refined (overlap {r['was']:.3f} -> {r['score']:.3f}) "
+                     f"and saved")
+        else:
+            self.status.config(
+                text=f"couldn't refine ({r.get('reason', '?')}) - get it roughly "
+                     f"aligned by hand first (arrows to move, [ ] to zoom)")
 
     def _save_calib(self, ir, color):
         try:
@@ -423,11 +465,16 @@ class ViewerGUI:
             "Controls",
             "Modes:        keys 1-7  (or View > Mode)\n"
             "Aspect:       F fit / L fill / T stretch  (or View > Aspect)\n"
-            "Fusion align: arrow keys move, [ ] zoom the IR overlay\n"
+            "Align by hand: arrow keys move, [ ] zoom the IR overlay\n"
+            "               (auto-saved; reloads next launch)\n"
+            "Refine align: E  (ECC polish of the current alignment)\n"
+            "Auto-align:   A  (best-effort feature match, then refine)\n"
             "Opacity:      + / -\n"
             "Snapshot:     Ctrl+S\n"
             "Record:       Ctrl+R\n"
-            "Quit:         Esc")
+            "Quit:         Esc\n\n"
+            "Tip: the IR and RGB cameras are fixed, so align once and it "
+            "sticks. If auto-align misses, nudge it close by hand and press E.")
 
     def _show_about(self):
         messagebox.showinfo(

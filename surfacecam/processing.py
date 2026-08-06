@@ -98,6 +98,19 @@ class Aligner:
         g = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         return cv2.createCLAHE(2.0, (8, 8)).apply(g)
 
+    @staticmethod
+    def _structure(gray):
+        """Gradient-magnitude image. NIR and visible intensities don't match,
+        but their *edges* do, so gradient domain is what ECC/scoring should use
+        for cross-modal alignment."""
+        g = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        g = cv2.createCLAHE(2.0, (8, 8)).apply(g)
+        g = cv2.GaussianBlur(g, (3, 3), 0)
+        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy)
+        return cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
     def _correspondences(self, ir_gray, color_bgr, ratio=0.8):
         """Return matched (src_ir, dst_color) point lists for one frame pair."""
         g_ir = self._prep(ir_gray)
@@ -162,6 +175,60 @@ class Aligner:
         info["frames"] = len(pairs)
         self.last_info = info
         return info
+
+    # -- photometric refinement (ECC) -------------------------------------
+    def alignment_score(self, ir_gray, color_bgr, M=None) -> float:
+        """Normalised cross-correlation between the warped IR and the color
+        image over the covered region. 1.0 = perfect, ~0 = unrelated."""
+        M = self.M if M is None else M
+        if M is None:
+            return -1.0
+        ch, cw = color_bgr.shape[:2]
+        warped = cv2.warpAffine(ir_gray, M, (cw, ch))
+        tmpl = self._structure(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY))
+        inp = self._structure(warped)
+        mask = warped > 0
+        if int(mask.sum()) < 2000:
+            return -1.0
+        a = inp[mask].astype(np.float32)
+        b = tmpl[mask].astype(np.float32)
+        a -= a.mean()
+        b -= b.mean()
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        return float(a @ b / denom) if denom > 0 else -1.0
+
+    def refine_ecc(self, ir_gray, color_bgr, motion="affine") -> dict:
+        """Polish the current transform by directly maximising image overlap
+        (ECC). Starts from the existing M (manual or auto), so it needs a
+        roughly-correct starting point. Only keeps the result if it measurably
+        improves the alignment score, so it can never make things worse."""
+        self._ensure(ir_gray.shape, color_bgr.shape)
+        base = self.alignment_score(ir_gray, color_bgr)
+        ch, cw = color_bgr.shape[:2]
+        tmpl = self._structure(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY))
+        warped = cv2.warpAffine(ir_gray, self.M, (cw, ch))
+        inp = self._structure(warped)
+        mt = cv2.MOTION_AFFINE if motion == "affine" else cv2.MOTION_EUCLIDEAN
+        warp = np.eye(2, 3, dtype=np.float32)
+        crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6)
+        try:
+            _, warp = cv2.findTransformECC(tmpl, inp, warp, mt, crit, None, 5)
+        except cv2.error:
+            return {"ok": False, "reason": "ECC diverged", "score": base}
+        # ECC gives a color-space correction; direction is ambiguous, so try
+        # both and keep whichever actually improves the measured score.
+        A = np.vstack([self.M, [0, 0, 1]])
+        W = np.vstack([warp, [0, 0, 1]])
+        best_m, best = None, base
+        for cand in (W @ A, np.linalg.inv(W) @ A):
+            m = cand[:2].astype(np.float32)
+            sc = self.alignment_score(ir_gray, color_bgr, m)
+            if sc > best:
+                best, best_m = sc, m
+        if best_m is None:
+            return {"ok": False, "reason": "no improvement", "score": base}
+        self.M = best_m
+        return {"ok": True, "score": best, "was": base}
 
     # -- persistence (the sensor geometry is fixed, so save it once) -------
     def save(self, path, ir_shape, color_shape) -> bool:

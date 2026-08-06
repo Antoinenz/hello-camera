@@ -56,16 +56,27 @@ The default viewer is a native Windows window with a **menu bar**:
   move / zoom / opacity for the fusion modes
 - **Help** — controls & about
 
-### Auto-align
+### Aligning the IR overlay
 
-**Overlay → Auto-align now** (`A`) lines the IR image up with the RGB feed
-automatically: it matches shared features (ORB) between the two views, pools
-the correspondences across ~15 frames, and solves a similarity transform
-(zoom + rotate + move) with RANSAC. Because the two sensors are fixed in the
-chassis, the transform is constant — so the result is **saved to
-`calibration.json`** and reloaded on the next launch. **Overlay → Auto-align
-(live)** keeps re-solving as you move. Fill the frame with texture (your face
-+ background) for the best lock.
+The IR and RGB sensors are fixed in the chassis, so their alignment is a
+**constant** — you only need to get it right once. It's saved to
+`calibration.json` and reloaded automatically on the next launch.
+
+Recommended workflow:
+
+1. **Align by hand** — in a fusion mode, use the **arrow keys** to move and
+   `[` / `]` to zoom the IR overlay until it roughly lines up. This is
+   auto-saved as you go.
+2. **Refine** — press **`E`** (Overlay → Refine alignment). This runs a
+   photometric ECC alignment in the gradient domain that polishes the current
+   transform to sub-pixel and saves it. It only keeps the result if it
+   measurably improves the overlap, so it never makes things worse.
+
+**`A`** (Overlay → Auto-align) tries to find the alignment from scratch by
+matching shared features (ORB) across ~15 frames, then refines with ECC. It's
+convenient when it works, but cross-modal (near-IR vs visible) feature matching
+is inherently marginal — if it misses, just nudge it close by hand and press
+`E`. **Overlay → Auto-align (live)** keeps re-solving as you move.
 
 > The IR emitter *strobes*, so raw IR frames alternate bright/dark. The capture
 > layer detects and holds the last illuminated frame, which stabilises the live
