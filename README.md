@@ -177,12 +177,30 @@ an amount that depends on distance (parallax). The **Depth map** mode
   uses that as a crisp cutout mask and colours it by the stereo disparity
   (near/far *within* the subject) while dimming the background. Cleaner-looking
   than raw stereo for portraits.
+- **Calibrated (checkerboard stereo)** — the true-quality path. Run
+  `python scripts/stereo_calibrate.py` once with a printed checkerboard to
+  compute a real stereo calibration (`captures/stereo_calib.npz`); the app then
+  rectifies both views and runs proper stereo matching (metric-ish depth) —
+  far more accurate than the uncalibrated methods. Falls back to stereo until
+  the calibration file exists.
 - **Auto** *(default)* — uses stereo when the color image has enough contrast,
   and falls back to proximity in low light (where the color sensor goes near-
   black and stereo has nothing to match). The status bar shows which is active.
 
 ML monocular depth (MiDaS) remains a possible future opt-in (needs PyTorch,
 ~2GB) and is left commented in `requirements.txt`.
+
+### Stereo calibration (for the Calibrated method)
+
+```bash
+python scripts/stereo_calibrate.py            # 9x6 inner corners, 25mm squares
+```
+
+Print a checkerboard, mount it flat, and hold it in front of the camera; the
+script auto-captures ~20 pairs when the board is seen in *both* the RGB and IR
+views (vary angle/distance to fill the frame), then computes and saves the
+rectification. Watch the reported RMS reprojection error (<1px great, >3 redo).
+Cross-modal detection can be finicky — matte paper reads best in IR.
 
 ## Virtual camera
 
@@ -230,6 +248,7 @@ surfacecam/
   gui.py                    native Tkinter viewer with menu bar (default)
   app.py                    legacy OpenCV viewer (--cv)
 scripts/enumerate_sources.py  standalone source enumeration probe
+scripts/stereo_calibrate.py   checkerboard stereo calibration for Calibrated depth
 scripts/ir_transmit.py        blink a Morse message via the IR emitter (PoC)
 scripts/ir_receive.py         decode a phone recording of the blink back to text
 ```

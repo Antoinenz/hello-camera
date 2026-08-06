@@ -60,6 +60,7 @@ class ViewerGUI:
         self.out_dir = out_dir
         self.calib_path = calib_path
         self._calib_tried = False
+        self.stereo_calib = P.load_stereo_calib("captures/stereo_calib.npz")
         self.cams = SurfaceCameras(color=True, ir=True)
         self.aligner = P.Aligner()
         self.alpha = 0.5
@@ -152,6 +153,10 @@ class ViewerGUI:
                                    value="stereo", variable=self.depth_method_var)
         depth_menu.add_radiobutton(label="Portrait (subject cutout + stereo)",
                                    value="portrait", variable=self.depth_method_var)
+        depth_menu.add_radiobutton(
+            label="Calibrated (checkerboard stereo)" if self.stereo_calib
+            else "Calibrated (run stereo_calibrate.py first)",
+            value="calibrated", variable=self.depth_method_var)
         depth_menu.add_radiobutton(label="Proximity (IR intensity)",
                                    value="proximity", variable=self.depth_method_var)
         view.add_cascade(label="Depth method", menu=depth_menu)
@@ -421,6 +426,12 @@ class ViewerGUI:
         if method == "auto" and P.depth_confidence(color) < 0.5:
             self._depth_note("auto: proximity (too dark for stereo)")
             return P.proximity_map(ir)      # too dark for stereo -> IR intensity
+        if method == "calibrated":
+            if self.stereo_calib is not None:
+                self._depth_note("calibrated stereo")
+                return P.calibrated_depth(color, ir, self.stereo_calib)
+            self._depth_note("calibrated: no calibration - run stereo_calibrate.py")
+            method = "stereo"                   # fall back until calibrated
         aligned = self.aligner.warp_ir_to_color(ir, color.shape)
         if method == "portrait":
             self._depth_note("portrait")

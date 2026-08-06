@@ -190,6 +190,65 @@ def portrait_depth(color_bgr: np.ndarray, ir_gray_aligned: np.ndarray,
     return cv2.resize(heat, (cw, ch), interpolation=cv2.INTER_NEAREST)
 
 
+def load_stereo_calib(path):
+    """Load a stereo rectification bundle saved by scripts/stereo_calibrate.py.
+    Returns a dict of arrays, or None if absent/unreadable."""
+    if not os.path.exists(path):
+        return None
+    try:
+        d = np.load(path)
+        return {k: d[k] for k in d.files}
+    except Exception:
+        return None
+
+
+def calibrated_depth(color_bgr, ir_gray, calib, colormap=cv2.COLORMAP_TURBO):
+    """Metric-ish depth from a *calibrated* stereo pair.
+
+    Uses the rectification maps + Q from a checkerboard stereo calibration:
+    rectify both views so epipolar lines are horizontal, run SGBM, and (if Q is
+    present) reproject disparity to real distance. Far more accurate than the
+    uncalibrated methods, but requires running the calibration once.
+    """
+    cw, ch = color_bgr.shape[1], color_bgr.shape[0]
+    # both cameras are calibrated at a common size; match it before remapping
+    W, H = int(calib["calib_w"]), int(calib["calib_h"])
+    mapcx, mapcy = calib["map_color_x"], calib["map_color_y"]
+    mapix, mapiy = calib["map_ir_x"], calib["map_ir_y"]
+    cg = cv2.resize(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY), (W, H))
+    ig = cv2.resize(ir_gray, (W, H))
+    rc = cv2.remap(cg, mapcx, mapcy, cv2.INTER_LINEAR)
+    ri = cv2.remap(ig, mapix, mapiy, cv2.INTER_LINEAR)
+    rc = _clahe(rc)
+    ri = _clahe(ri)
+
+    nd = int(calib["num_disparities"]) if "num_disparities" in calib else 96
+    bs = int(calib["block_size"]) if "block_size" in calib else 7
+    sg = cv2.StereoSGBM_create(
+        minDisparity=0, numDisparities=nd, blockSize=bs,
+        P1=8 * bs * bs, P2=32 * bs * bs, uniquenessRatio=8,
+        speckleWindowSize=100, speckleRange=2, disp12MaxDiff=1,
+        mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+    disp = sg.compute(rc, ri).astype(np.float32) / 16.0
+
+    valid = disp > 0
+    if "Q" in calib and valid.any():
+        pts = cv2.reprojectImageTo3D(disp, calib["Q"])
+        z = pts[..., 2]
+        z[~valid | ~np.isfinite(z)] = 0
+        v = z[valid & np.isfinite(z)]
+        if v.size:
+            lo, hi = np.percentile(v, (5, 95))
+            norm = np.clip((z - lo) / max(hi - lo, 1e-3), 0, 1)
+        else:
+            norm = np.zeros_like(z)
+    else:
+        norm = np.clip(disp / max(nd, 1), 0, 1)
+    heat = cv2.applyColorMap((norm * 255).astype(np.uint8), colormap)
+    heat[~valid] = 0
+    return cv2.resize(heat, (cw, ch), interpolation=cv2.INTER_NEAREST)
+
+
 class Aligner:
     """Maps the IR frame onto the color frame with a 2x3 affine transform.
 
