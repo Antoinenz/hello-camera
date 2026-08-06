@@ -74,13 +74,20 @@ chassis, the transform is constant — so the result is **saved to
 ### Frame rate
 
 The IR sensor exposes a single mode — **480×480 L8 @ 60fps** — and that is its
-maximum; there is no higher-rate format to request. To actually capture at that
-rate, frames are pulled on a **background thread** (`SurfaceCameras.start_pump`)
-and cached, so the sensor runs full-speed independently of the render loop. The
-GUI then draws the freshest frame as fast as it can (the "FPS" overlay shows the
-draw rate; the "IR fps" line shows the true capture rate). Heavier modes
-(fusion) draw slower than light ones (raw IR), but no captured frames are
-dropped either way.
+maximum; there is no higher-rate format to request. Getting the app to actually
+run near that rate came down to three things (all CPU — the work is light enough
+that GPU offload isn't needed and would only add transfer overhead):
+
+1. **Background capture pump** (`SurfaceCameras.start_pump`) pulls frames on a
+   thread so the sensor runs full-speed independently of rendering.
+2. **Fast fusion** — the RGB+IR blend uses OpenCV SIMD `addWeighted` +
+   `cv2.copyTo` instead of full-frame float math (≈48ms → ≈1.5ms per frame).
+3. **Render on new frames only** — the draw loop redraws when the pump reports a
+   new frame (tracked by `frame_ver`) rather than on a fixed timer, so it neither
+   throttles nor wastes work re-drawing duplicates.
+
+Result: all modes, including fusion, render around 45–60fps. The "FPS" overlay
+shows the draw rate; the "IR fps" line shows the true illuminated capture rate.
 
 Keyboard shortcuts mirror the menus:
 

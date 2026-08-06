@@ -52,6 +52,7 @@ class ViewerGUI:
         self._ir_last_cnt = 0
         self._ir_last_t = time.time()
         self._frame_i = 0
+        self._last_ver = -1
         self._photo = None  # keep a ref so Tk doesn't GC the image
 
         self.root = tk.Tk()
@@ -195,32 +196,38 @@ class ViewerGUI:
 
     def _tick(self):
         try:
-            self._frame_i += 1
-            color = self.cams.latest_color()
-            ir = self.cams.latest_ir()
-            # once, on the first good frame pair, load a saved calibration
-            if not self._calib_tried and color is not None and ir is not None:
-                self._calib_tried = True
-                if self.aligner.load(self.calib_path, ir.shape, color.shape):
-                    self.status.config(text=f"loaded calibration from {self.calib_path}")
-            if (self.autoalign_live_var.get() and color is not None
-                    and ir is not None and self._frame_i % 8 == 0):
-                info = self.aligner.auto_align(ir, color)
-                if info.get("ok"):
-                    self._save_calib(ir, color)
-                    self.status.config(
-                        text=f"auto-align (live): {info['inliers']}/{info['matches']} "
-                             f"inliers, scale {info['scale']:.2f}  (saved)")
-            frame = self._render(color, ir)
-            if frame is not None:
-                self._update_fps()
-                if self.writer is not None:
-                    self._write(frame)
-                self._show(frame)
-                self._update_status(frame)
+            # render only when the pump has a new frame; otherwise just poll
+            ver = self.cams.frame_ver
+            if ver != self._last_ver:
+                self._last_ver = ver
+                self._frame_i += 1
+                color = self.cams.latest_color()
+                ir = self.cams.latest_ir()
+                # once, on the first good frame pair, load a saved calibration
+                if not self._calib_tried and color is not None and ir is not None:
+                    self._calib_tried = True
+                    if self.aligner.load(self.calib_path, ir.shape, color.shape):
+                        self.status.config(
+                            text=f"loaded calibration from {self.calib_path}")
+                if (self.autoalign_live_var.get() and color is not None
+                        and ir is not None and self._frame_i % 8 == 0):
+                    info = self.aligner.auto_align(ir, color)
+                    if info.get("ok"):
+                        self._save_calib(ir, color)
+                        self.status.config(
+                            text=f"auto-align (live): {info['inliers']}/"
+                                 f"{info['matches']} inliers, scale "
+                                 f"{info['scale']:.2f}  (saved)")
+                frame = self._render(color, ir)
+                if frame is not None:
+                    self._update_fps()
+                    if self.writer is not None:
+                        self._write(frame)
+                    self._show(frame)
+                    self._update_status(frame)
         except Exception as e:  # keep the loop alive, surface once
             self.status.config(text=f"error: {e}")
-        self.root.after(15, self._tick)
+        self.root.after(2, self._tick)
 
     # ------------------------------------------------------------------
     def _render(self, color, ir):

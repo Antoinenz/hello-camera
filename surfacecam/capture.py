@@ -112,6 +112,9 @@ class SurfaceCameras:
         # counts distinct *illuminated* IR frames accepted (held-frame stream);
         # lets a consumer measure the true illuminated frame rate
         self.ir_new_count: int = 0
+        # bumps whenever the cached color/IR frame changes, so a renderer can
+        # draw only on new frames instead of re-drawing duplicates
+        self.frame_ver: int = 0
         # background capture pump (decouples sensor rate from the render loop)
         self._pump: threading.Thread | None = None
         self._pump_stop: threading.Event | None = None
@@ -182,6 +185,7 @@ class SurfaceCameras:
                             self._cache_color = c
                         if ir is not None:
                             self._cache_ir = ir
+                        self.frame_ver += 1
                 time.sleep(interval)
 
         self._pump = threading.Thread(target=loop, name="ir-pump", daemon=True)
