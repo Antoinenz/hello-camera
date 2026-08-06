@@ -134,11 +134,24 @@ class SurfaceCameras:
         self._ir_streaming = False
 
     # -- public sync API ---------------------------------------------------
-    def open(self):
-        asyncio.run(self._open_async())
-        # _open_async starts whatever readers exist
-        self._color_streaming = self._color.reader is not None
-        self._ir_streaming = self._ir.reader is not None
+    def open(self, retries: int = 5, retry_delay: float = 1.5):
+        # The Hello camera is exclusive; right after a prior handle closes the
+        # MFT can briefly report "lack of hardware resources". Retry a few times.
+        last = None
+        for attempt in range(retries):
+            try:
+                asyncio.run(self._open_async())
+                self._color_streaming = self._color.reader is not None
+                self._ir_streaming = self._ir.reader is not None
+                return
+            except OSError as e:
+                last = e
+                try:
+                    asyncio.run(self._close_async())    # release partial handle
+                except Exception:
+                    pass
+                time.sleep(retry_delay)
+        raise last
 
     def read_color(self) -> np.ndarray | None:
         return self._read(self._color, bitmap_to_bgr) if self.want_color else None

@@ -151,20 +151,33 @@ Keyboard shortcuts mirror the menus:
 
 Output files go to `captures/`.
 
-## About "depth"
+## Depth
 
-The Surface Hello camera has a **color** and an **infrared** sensor — but **no
-depth sensor** (no stereo pair, no time-of-flight). So there is no true metric
-depth to read. Two honest alternatives:
+The Surface Hello camera has no dedicated depth sensor (no time-of-flight), so
+there's no *metric* depth to read. But the color and IR sensors sit a few cm
+apart — a real **stereo baseline** — so their two views of the scene disagree by
+an amount that depends on distance (parallax). The **Depth map** mode
+(`View → Depth method`) offers:
 
-1. **Proximity map (implemented).** IR flood illumination falls off with
-   distance, so IR brightness is a rough proxy for how close something is.
-   The `proximity` mode false-colors this. It is a real signal, but it is
-   *not* calibrated depth — a white shirt up close and a face further away can
-   read similarly.
-2. **ML monocular depth (optional, not installed).** A model such as MiDaS can
-   *estimate* depth from the RGB image alone. It needs PyTorch (~2GB), so it is
-   left as an opt-in dependency in `requirements.txt`.
+- **Stereo (parallax)** — the improved method. After the IR is aligned onto the
+  RGB, whatever displacement remains is stereo disparity. We recover it with
+  dense optical flow (in a contrast-normalized domain for cross-modal
+  robustness), project it onto the baseline axis, and false-color the result.
+  This actually *measures* relative depth (near vs far), rather than guessing —
+  e.g. a dark backpack close to the lens reads as "near" even though it's dark
+  in IR. It's **relative, not metric** (no factory stereo calibration), covers
+  only the IR sensor's square field of view, and depends on a good IR↔RGB
+  alignment (align by hand + `E`, see above).
+- **Proximity (IR intensity)** — the fallback. IR flood illumination falls off
+  with distance, so IR brightness is a rough closeness proxy. Works in the dark
+  (the emitter lights the scene) but can't tell a bright near object from a
+  bright far one.
+- **Auto** *(default)* — uses stereo when the color image has enough contrast,
+  and falls back to proximity in low light (where the color sensor goes near-
+  black and stereo has nothing to match). The status bar shows which is active.
+
+ML monocular depth (MiDaS) remains a possible future opt-in (needs PyTorch,
+~2GB) and is left commented in `requirements.txt`.
 
 ## IR transmit (proof-of-concept)
 

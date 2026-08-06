@@ -43,6 +43,92 @@ def proximity_map(ir: np.ndarray, colormap: int = cv2.COLORMAP_INFERNO) -> np.nd
     return heat
 
 
+def _clahe(gray):
+    return cv2.createCLAHE(2.0, (8, 8)).apply(
+        cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8))
+
+
+def depth_confidence(color_bgr: np.ndarray) -> float:
+    """0..1 estimate of whether stereo depth can work: it needs a RGB image
+    with real contrast. In low light the color sensor goes near-black (the IR
+    emitter still lights the scene, but stereo needs BOTH views), so contrast
+    collapses and this returns ~0 - the cue for 'auto' to fall back to the
+    IR-intensity proximity map."""
+    g = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY)
+    std = float(g.std())          # dark scene ~1, well-lit ~50-80
+    return float(np.clip((std - 10.0) / 30.0, 0.0, 1.0))
+
+
+def stereo_depth(color_bgr: np.ndarray, ir_gray_aligned: np.ndarray,
+                 work_w: int = 360, colormap: int = cv2.COLORMAP_TURBO,
+                 return_conf: bool = False):
+    """Relative depth from RGB<->IR parallax.
+
+    The IR and color sensors sit a few cm apart, so after the global alignment
+    is applied (ir_gray_aligned), whatever displacement remains between the two
+    views is stereo disparity: it's ~0 at the depth the alignment was tuned for,
+    and grows with distance from that plane. We recover it with dense optical
+    flow (in a CLAHE'd, gradient-friendly domain for cross-modal robustness),
+    project the flow onto its dominant axis (the epipolar/baseline direction),
+    and false-color the signed result.
+
+    Returns a BGR depth image (and, if return_conf, a 0..1 confidence scalar
+    for auto mode - low when the scene lacks the texture stereo needs).
+    """
+    ch, cw = color_bgr.shape[:2]
+    s = work_w / cw
+    ws = (work_w, max(1, int(ch * s)))
+    cg = _clahe(cv2.resize(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY), ws))
+    ig = _clahe(cv2.resize(ir_gray_aligned, ws))
+    mask = cv2.resize(ir_gray_aligned, ws, interpolation=cv2.INTER_NEAREST) > 0
+
+    flow = cv2.calcOpticalFlowFarneback(
+        cg, ig, None, pyr_scale=0.5, levels=4, winsize=21,
+        iterations=3, poly_n=7, poly_sigma=1.5, flags=0)
+    fx, fy = flow[..., 0], flow[..., 1]
+    mag = np.sqrt(fx * fx + fy * fy)
+
+    # texture confidence: stereo is only trustworthy where there are gradients
+    gx = cv2.Sobel(cg, cv2.CV_32F, 1, 0, 3)
+    gy = cv2.Sobel(cg, cv2.CV_32F, 0, 1, 3)
+    tex = cv2.GaussianBlur(np.sqrt(gx * gx + gy * gy), (0, 0), 3)
+    conf_map = (tex > np.percentile(tex[mask], 50) if mask.any() else tex > 1e9)
+    good = mask & conf_map & (mag < np.percentile(mag[mask], 98) if mask.any() else mag < 0)
+
+    # dominant flow (baseline) direction from confident vectors, via PCA
+    if int(good.sum()) > 50:
+        vecs = np.stack([fx[good], fy[good]], 1)
+        vecs = vecs[np.linalg.norm(vecs, axis=1) > 0.3]
+    else:
+        vecs = np.empty((0, 2), np.float32)
+    if len(vecs) > 50:
+        vv = vecs - vecs.mean(0)
+        _, _, vt = np.linalg.svd(vv, full_matrices=False)
+        axis = vt[0]
+        # SVD axis sign is arbitrary and would flip near/far colors between
+        # frames; the baseline is fixed, so pin a stable convention.
+        if axis[0] < 0 or (axis[0] == 0 and axis[1] < 0):
+            axis = -axis
+        disp = fx * axis[0] + fy * axis[1]        # signed projection = disparity
+    else:
+        disp = mag                                 # fallback: unsigned magnitude
+
+    disp = cv2.medianBlur(disp.astype(np.float32), 5)
+    if mask.any():
+        lo, hi = np.percentile(disp[mask], (5, 95))
+    else:
+        lo, hi = 0.0, 1.0
+    norm = np.clip((disp - lo) / max(hi - lo, 1e-3), 0, 1)
+    d8 = (norm * 255).astype(np.uint8)
+    heat = cv2.applyColorMap(d8, colormap)
+    heat[~mask] = 0
+    heat = cv2.resize(heat, (cw, ch), interpolation=cv2.INTER_LINEAR)
+
+    if return_conf:
+        return heat, depth_confidence(color_bgr)
+    return heat
+
+
 class Aligner:
     """Maps the IR frame onto the color frame with a 2x3 affine transform.
 

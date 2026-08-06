@@ -30,7 +30,7 @@ MODES = [
     ("side",      "Side by side: RGB | IR"),
     ("fuse",      "RGB + IR fusion (overlay)"),
     ("edgefuse",  "RGB + IR edges"),
-    ("proximity", "IR proximity map (not true depth)"),
+    ("proximity", "Depth map (IR proximity / stereo)"),
     ("iredges",   "IR edges"),
 ]
 ASPECTS = ["fit", "fill", "stretch"]
@@ -90,6 +90,7 @@ class ViewerGUI:
         self.autoalign_live_var = tk.BooleanVar(value=False)
         self.ir_source_var = tk.StringVar(value=self.cams.ir_mode)
         self.autopause_min_var = tk.BooleanVar(value=True)
+        self.depth_method_var = tk.StringVar(value="auto")
 
         self._build_menu()
         self._build_widgets()
@@ -133,6 +134,15 @@ class ViewerGUI:
                                 value="raw", variable=self.ir_source_var,
                                 command=self._set_ir_source)
         view.add_cascade(label="IR source", menu=ir_menu)
+
+        depth_menu = tk.Menu(view, tearoff=0)
+        depth_menu.add_radiobutton(label="Auto (stereo in good light, else IR)",
+                                   value="auto", variable=self.depth_method_var)
+        depth_menu.add_radiobutton(label="Stereo (RGB<->IR parallax)",
+                                   value="stereo", variable=self.depth_method_var)
+        depth_menu.add_radiobutton(label="Proximity (IR intensity)",
+                                   value="proximity", variable=self.depth_method_var)
+        view.add_cascade(label="Depth method", menu=depth_menu)
 
         view.add_checkbutton(label="Show status bar", variable=self.statusbar_var,
                              command=self._toggle_statusbar)
@@ -330,7 +340,11 @@ class ViewerGUI:
     def _manage_sources(self):
         """Power down whichever camera the current mode doesn't need (after a
         short grace, so flipping modes doesn't churn the hardware)."""
-        need_c, need_i = MODE_SOURCES.get(self.mode_var.get(), (True, True))
+        mode = self.mode_var.get()
+        need_c, need_i = MODE_SOURCES.get(mode, (True, True))
+        # the depth mode needs the color camera too when it may use stereo
+        if mode == "proximity" and self.depth_method_var.get() in ("stereo", "auto"):
+            need_c = True
         now = time.time()
         self._color_unused_since = None if need_c else (
             self._color_unused_since or now)
@@ -364,7 +378,7 @@ class ViewerGUI:
         if name == "iredges":
             return P.ir_edges(ir) if ir is not None else None
         if name == "proximity":
-            return P.proximity_map(ir) if ir is not None else None
+            return self._render_depth(color, ir)
         if name == "rgb":
             return color
         if name == "side":
@@ -380,6 +394,26 @@ class ViewerGUI:
         if name == "edgefuse":
             return P.edge_fuse(color, aligned)
         return color
+
+    def _render_depth(self, color, ir):
+        if ir is None:
+            return None
+        method = self.depth_method_var.get()
+        # need a color frame for stereo; fall back to proximity without one
+        if method == "proximity" or color is None:
+            self._depth_note("proximity")
+            return P.proximity_map(ir)
+        if method == "auto" and P.depth_confidence(color) < 0.5:
+            self._depth_note("auto: proximity (too dark for stereo)")
+            return P.proximity_map(ir)      # too dark for stereo -> IR intensity
+        self._depth_note("stereo" if method == "stereo" else "auto: stereo")
+        aligned = self.aligner.warp_ir_to_color(ir, color.shape)
+        return P.stereo_depth(color, aligned)
+
+    def _depth_note(self, note):
+        if getattr(self, "_last_depth_note", None) != note:
+            self._last_depth_note = note
+            self.status.config(text=f"depth: {note}")
 
     def _show(self, frame):
         cw = max(1, self.canvas.winfo_width())
@@ -610,8 +644,9 @@ class ViewerGUI:
             "About SurfaceCam",
             "SurfaceCam - RGB + IR viewer for the Surface Windows Hello camera.\n\n"
             "Reads the COLOR and INFRARED sensors via the WinRT Media Frame\n"
-            "Source API. The module has no depth sensor, so 'proximity' is an\n"
-            "IR-intensity closeness proxy, not metric depth.")
+            "Source API. No dedicated depth sensor, so depth is either an\n"
+            "IR-intensity proximity proxy or RGB<->IR stereo parallax\n"
+            "(relative, not metric). View > Depth method: auto/stereo/proximity.")
 
     def _on_close(self):
         if self.writer is not None:
