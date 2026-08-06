@@ -112,7 +112,7 @@ class ViewerGUI:
 
         _set_app_id()                   # so the taskbar uses our icon, not python's
         self.root = tk.Tk()
-        self.root.title("HelloCam - RGB + IR")
+        self.root.title("HelloCam")
         self.root.geometry("980x680")
         self.root.minsize(320, 240)
         self.root.configure(bg="black")
