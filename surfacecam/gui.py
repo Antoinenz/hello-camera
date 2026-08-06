@@ -48,6 +48,9 @@ class ViewerGUI:
         self._rec_size = None
         self._fps = 0.0
         self._last = time.time()
+        self._ir_fps = 0.0              # rate of new illuminated (held) IR frames
+        self._ir_last_cnt = 0
+        self._ir_last_t = time.time()
         self._frame_i = 0
         self._photo = None  # keep a ref so Tk doesn't GC the image
 
@@ -254,12 +257,19 @@ class ViewerGUI:
         self.canvas.config(image=self._photo)
 
     def _draw_fps(self, disp):
-        txt = f"{self._fps:4.1f} FPS"
         font = cv2.FONT_HERSHEY_SIMPLEX
-        (tw, th), _ = cv2.getTextSize(txt, font, 0.6, 2)
-        x, y = disp.shape[1] - tw - 12, th + 12
-        cv2.putText(disp, txt, (x, y), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(disp, txt, (x, y), font, 0.6, (80, 255, 180), 1, cv2.LINE_AA)
+        lines = [f"{self._fps:4.1f} FPS"]
+        if self.antiflicker_var.get():
+            lines.append(f"IR {self._ir_fps:4.1f} fps")
+        y = 0
+        for i, txt in enumerate(lines):
+            (tw, th), _ = cv2.getTextSize(txt, font, 0.6, 2)
+            if i == 0:
+                y = th + 12
+            x = disp.shape[1] - tw - 12
+            cv2.putText(disp, txt, (x, y), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(disp, txt, (x, y), font, 0.6, (80, 255, 180), 1, cv2.LINE_AA)
+            y += th + 8
 
     # ------------------------------------------------------------------
     def _update_fps(self):
@@ -268,6 +278,13 @@ class ViewerGUI:
         self._last = now
         if dt > 0:
             self._fps = 0.9 * self._fps + 0.1 * (1.0 / dt)
+        # illuminated (held) IR frame rate, measured over a ~0.5s window so the
+        # bursty strobe averages out
+        win = now - self._ir_last_t
+        if win >= 0.5:
+            self._ir_fps = (self.cams.ir_new_count - self._ir_last_cnt) / win
+            self._ir_last_cnt = self.cams.ir_new_count
+            self._ir_last_t = now
 
     def _update_status(self, frame):
         if not self.statusbar_var.get():
@@ -275,10 +292,11 @@ class ViewerGUI:
         desc = dict(MODES)[self.mode_var.get()]
         rec = "  ● REC" if self.writer is not None else ""
         h, w = frame.shape[:2]
+        ir = f"   |   IR {self._ir_fps:4.1f} fps" if self.antiflicker_var.get() else ""
         self.status.config(
             text=f"{desc}   |   aspect: {self.aspect_var.get()}   |   "
                  f"src {w}x{h}   |   alpha {self.alpha:.2f}   |   "
-                 f"{self._fps:4.1f} fps{rec}")
+                 f"{self._fps:4.1f} fps{ir}{rec}")
 
     # -- menu/key callbacks ------------------------------------------------
     def _on_mode_change(self):

@@ -106,6 +106,9 @@ class SurfaceCameras:
         self.ir_size: tuple[int, int] | None = None
         self._last_ir: np.ndarray | None = None
         self._ir_bright: float = 0.0
+        # counts distinct *illuminated* IR frames accepted (held-frame stream);
+        # lets a consumer measure the true illuminated frame rate
+        self.ir_new_count: int = 0
 
     # -- public sync API ---------------------------------------------------
     def open(self):
@@ -119,6 +122,8 @@ class SurfaceCameras:
             return None
         arr = self._read(self._ir, bitmap_to_gray)
         if not self.hold_illuminated:
+            if arr is not None:             # raw stream: every new frame counts
+                self.ir_new_count += 1
             return arr
         if arr is None:
             return self._last_ir            # keep last good frame across gaps
@@ -130,7 +135,8 @@ class SurfaceCameras:
             self._ir_bright = 0.95 * self._ir_bright + 0.05 * m
         thresh = max(6.0, 0.4 * self._ir_bright)
         if m >= thresh or self._last_ir is None:
-            self._last_ir = arr             # illuminated -> use and remember
+            self._last_ir = arr             # illuminated -> use, remember, count
+            self.ir_new_count += 1
             return arr
         return self._last_ir                # dark strobe frame -> hold previous
 
