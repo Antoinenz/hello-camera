@@ -89,15 +89,23 @@ class SurfaceCameras:
         cams.close()
     """
 
-    def __init__(self, color: bool = True, ir: bool = True, max_color_width: int = 1280):
+    def __init__(self, color: bool = True, ir: bool = True, max_color_width: int = 1280,
+                 hold_illuminated: bool = True):
         self.want_color = color
         self.want_ir = ir
         self.max_color_width = max_color_width
+        # Windows Hello IR cameras strobe the emitter: frames alternate between
+        # illuminated (bright) and non-illuminated (near-black). When True, the
+        # dark frames are skipped and the last illuminated frame is held, which
+        # stabilises the live view and gives feature matching a usable image.
+        self.hold_illuminated = hold_illuminated
         self._mc: MediaCapture | None = None
         self._color = _SourceRef("")
         self._ir = _SourceRef("")
         self.color_size: tuple[int, int] | None = None
         self.ir_size: tuple[int, int] | None = None
+        self._last_ir: np.ndarray | None = None
+        self._ir_bright: float = 0.0
 
     # -- public sync API ---------------------------------------------------
     def open(self):
@@ -107,7 +115,24 @@ class SurfaceCameras:
         return self._read(self._color, bitmap_to_bgr) if self.want_color else None
 
     def read_ir(self) -> np.ndarray | None:
-        return self._read(self._ir, bitmap_to_gray) if self.want_ir else None
+        if not self.want_ir:
+            return None
+        arr = self._read(self._ir, bitmap_to_gray)
+        if not self.hold_illuminated:
+            return arr
+        if arr is None:
+            return self._last_ir            # keep last good frame across gaps
+        m = float(arr.mean())
+        # track a decaying reference of the illuminated brightness level
+        if m > self._ir_bright:
+            self._ir_bright = m
+        else:
+            self._ir_bright = 0.95 * self._ir_bright + 0.05 * m
+        thresh = max(6.0, 0.4 * self._ir_bright)
+        if m >= thresh or self._last_ir is None:
+            self._last_ir = arr             # illuminated -> use and remember
+            return arr
+        return self._last_ir                # dark strobe frame -> hold previous
 
     def close(self):
         try:

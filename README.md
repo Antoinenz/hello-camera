@@ -47,9 +47,26 @@ The default viewer is a native Windows window with a **menu bar**:
 - **View → Mode** — IR / RGB / side-by-side / fusion / edge-fusion / proximity / IR-edges
 - **View → Aspect ratio** — **Fit** (letterbox, no crop), **Fill** (crop to fill),
   **Stretch** (ignore aspect). Default is *Fit*, so the video is never distorted.
+- **View → Show FPS overlay** — draw the live frame rate on the image
 - **Capture** — Snapshot, Start/Stop recording, Open captures folder
-- **Overlay** — live IR↔RGB alignment (move / zoom / opacity) for the fusion modes
+- **Overlay** — **Auto-align** the IR onto the RGB feed, plus manual
+  move / zoom / opacity for the fusion modes
 - **Help** — controls & about
+
+### Auto-align
+
+**Overlay → Auto-align now** (`A`) lines the IR image up with the RGB feed
+automatically: it matches shared features (ORB) between the two views, pools
+the correspondences across ~15 frames, and solves a similarity transform
+(zoom + rotate + move) with RANSAC. Because the two sensors are fixed in the
+chassis, the transform is constant — so the result is **saved to
+`calibration.json`** and reloaded on the next launch. **Overlay → Auto-align
+(live)** keeps re-solving as you move. Fill the frame with texture (your face
++ background) for the best lock.
+
+> The IR emitter *strobes*, so raw IR frames alternate bright/dark. The capture
+> layer detects and holds the last illuminated frame, which stabilises the live
+> view and gives auto-align a usable image.
 
 Keyboard shortcuts mirror the menus:
 
@@ -57,6 +74,7 @@ Keyboard shortcuts mirror the menus:
 |-----|--------|
 | `1`–`7` | switch mode |
 | `F` / `L` / `T` | aspect Fit / Fill / Stretch |
+| `A` | auto-align IR to RGB |
 | arrows | nudge the IR overlay alignment |
 | `[` `]` | scale the IR overlay |
 | `-` `+` | fusion overlay opacity |

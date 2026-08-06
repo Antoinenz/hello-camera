@@ -37,8 +37,10 @@ ASPECTS = ["fit", "fill", "stretch"]
 
 
 class ViewerGUI:
-    def __init__(self, out_dir: str = "captures"):
+    def __init__(self, out_dir: str = "captures", calib_path: str = "calibration.json"):
         self.out_dir = out_dir
+        self.calib_path = calib_path
+        self._calib_tried = False
         self.cams = SurfaceCameras(color=True, ir=True)
         self.aligner = P.Aligner()
         self.alpha = 0.5
@@ -46,6 +48,7 @@ class ViewerGUI:
         self._rec_size = None
         self._fps = 0.0
         self._last = time.time()
+        self._frame_i = 0
         self._photo = None  # keep a ref so Tk doesn't GC the image
 
         self.root = tk.Tk()
@@ -58,6 +61,8 @@ class ViewerGUI:
         self.mode_var = tk.StringVar(value=MODES[0][0])
         self.aspect_var = tk.StringVar(value="fit")
         self.statusbar_var = tk.BooleanVar(value=True)
+        self.fps_var = tk.BooleanVar(value=True)
+        self.autoalign_live_var = tk.BooleanVar(value=False)
 
         self._build_menu()
         self._build_widgets()
@@ -88,6 +93,7 @@ class ViewerGUI:
         view.add_cascade(label="Aspect ratio", menu=aspect_menu)
 
         view.add_separator()
+        view.add_checkbutton(label="Show FPS overlay", variable=self.fps_var)
         view.add_checkbutton(label="Show status bar", variable=self.statusbar_var,
                              command=self._toggle_statusbar)
         view.add_command(label="Reset IR alignment", command=self._reset_align)
@@ -108,6 +114,10 @@ class ViewerGUI:
 
         # Overlay (fusion alignment)
         ov = tk.Menu(menubar, tearoff=0)
+        ov.add_command(label="Auto-align now", accelerator="A",
+                       command=self._auto_align_once)
+        ov.add_checkbutton(label="Auto-align (live)", variable=self.autoalign_live_var)
+        ov.add_separator()
         ov.add_command(label="Nudge left", accelerator="Left",
                        command=lambda: self._nudge(dx=-4))
         ov.add_command(label="Nudge right", accelerator="Right",
@@ -162,6 +172,8 @@ class ViewerGUI:
         r.bind("<minus>", lambda e: self._set_alpha(-0.05))
         r.bind("<Control-s>", lambda e: self._snapshot())
         r.bind("<Control-r>", lambda e: self._toggle_record())
+        r.bind("a", lambda e: self._auto_align_once())
+        r.bind("A", lambda e: self._auto_align_once())
         r.bind("<Escape>", lambda e: self._on_close())
         r.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -175,8 +187,22 @@ class ViewerGUI:
 
     def _tick(self):
         try:
+            self._frame_i += 1
             color = self.cams.read_color()
             ir = self.cams.read_ir()
+            # once, on the first good frame pair, load a saved calibration
+            if not self._calib_tried and color is not None and ir is not None:
+                self._calib_tried = True
+                if self.aligner.load(self.calib_path, ir.shape, color.shape):
+                    self.status.config(text=f"loaded calibration from {self.calib_path}")
+            if (self.autoalign_live_var.get() and color is not None
+                    and ir is not None and self._frame_i % 8 == 0):
+                info = self.aligner.auto_align(ir, color)
+                if info.get("ok"):
+                    self._save_calib(ir, color)
+                    self.status.config(
+                        text=f"auto-align (live): {info['inliers']}/{info['matches']} "
+                             f"inliers, scale {info['scale']:.2f}  (saved)")
             frame = self._render(color, ir)
             if frame is not None:
                 self._update_fps()
@@ -217,9 +243,19 @@ class ViewerGUI:
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
         disp = P.apply_aspect(frame, cw, ch, self.aspect_var.get())
+        if self.fps_var.get():
+            self._draw_fps(disp)
         rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
         self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
         self.canvas.config(image=self._photo)
+
+    def _draw_fps(self, disp):
+        txt = f"{self._fps:4.1f} FPS"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th), _ = cv2.getTextSize(txt, font, 0.6, 2)
+        x, y = disp.shape[1] - tw - 12, th + 12
+        cv2.putText(disp, txt, (x, y), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(disp, txt, (x, y), font, 0.6, (80, 255, 180), 1, cv2.LINE_AA)
 
     # ------------------------------------------------------------------
     def _update_fps(self):
@@ -252,6 +288,43 @@ class ViewerGUI:
 
     def _set_alpha(self, d):
         self.alpha = float(min(1.0, max(0.0, self.alpha + d)))
+
+    def _auto_align_once(self):
+        # Cross-modal matching is marginal on any single frame, so collect a
+        # handful of frame pairs and pool their correspondences into one RANSAC
+        # solve. The transform is fixed hardware geometry, so one success is
+        # enough - then persist it for next launch.
+        self.status.config(text="auto-aligning...")
+        self.root.update_idletasks()
+        pairs = []
+        for _ in range(15):
+            color = self.cams.read_color()
+            ir = self.cams.read_ir()
+            if color is not None and ir is not None:
+                pairs.append((ir, color))
+            time.sleep(0.04)
+
+        if not pairs:
+            self.status.config(text="auto-align: need both cameras streaming")
+            return
+        info = self.aligner.auto_align_pooled(pairs)
+        if info.get("ok"):
+            self._save_calib(pairs[-1][0], pairs[-1][1])
+            self.status.config(
+                text=f"auto-align OK: {info['inliers']}/{info['matches']} inliers "
+                     f"over {info['frames']} frames, scale {info['scale']:.2f}  "
+                     f"(saved; use a fusion mode to see it)")
+        else:
+            self.status.config(
+                text=f"auto-align failed ({info.get('reason', '?')}, "
+                     f"{info.get('matches', 0)} matches) - face the camera with a "
+                     f"textured background and try again")
+
+    def _save_calib(self, ir, color):
+        try:
+            self.aligner.save(self.calib_path, ir.shape, color.shape)
+        except Exception:
+            pass
 
     def _reset_align(self):
         self.aligner = P.Aligner()

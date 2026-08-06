@@ -7,6 +7,9 @@ distance). It is clearly labelled as such in the UI.
 """
 from __future__ import annotations
 
+import json
+import os
+
 import cv2
 import numpy as np
 
@@ -41,43 +44,156 @@ def proximity_map(ir: np.ndarray, colormap: int = cv2.COLORMAP_INFERNO) -> np.nd
 
 
 class Aligner:
-    """Rough manual alignment of the square IR frame onto the wide color frame.
+    """Maps the IR frame onto the color frame with a 2x3 affine transform.
 
-    The two sensors sit side by side with different FOVs, so there is a fixed
-    offset/scale. There's no factory calibration exposed, so we let the user
-    nudge it live (arrow keys) and persist nothing - defaults look decent.
+    The two sensors sit side by side with different FOVs, so the IR view must
+    be scaled/rotated/translated to line up with the color view. The same
+    matrix `M` is driven either manually (nudge) or automatically by matching
+    shared features between the two images (auto_align).
     """
 
     def __init__(self):
-        self.scale = 1.30   # IR is zoomed vs color
-        self.dx = 0
-        self.dy = 0
+        self.M = None                 # 2x3 float32, maps IR px -> color px
+        self._color_shape = None
+        self.last_info = None         # stats from the most recent auto_align
 
-    def nudge(self, dx=0, dy=0, dscale=0.0):
-        self.dx += dx
-        self.dy += dy
-        self.scale = max(0.5, min(3.0, self.scale + dscale))
+    # -- geometry ----------------------------------------------------------
+    def reset(self, ir_shape, color_shape):
+        ih, iw = ir_shape[:2]
+        ch, cw = color_shape[:2]
+        s = ch / ih                   # fit IR height to color height
+        tx = (cw - iw * s) / 2.0
+        ty = (ch - ih * s) / 2.0
+        self.M = np.array([[s, 0, tx], [0, s, ty]], np.float32)
+        self._color_shape = color_shape
+
+    def _ensure(self, ir_shape, color_shape):
+        self._color_shape = color_shape
+        if self.M is None:
+            self.reset(ir_shape, color_shape)
 
     def warp_ir_to_color(self, ir_gray: np.ndarray, color_shape) -> np.ndarray:
-        """Return an IR gray image resampled into the color frame geometry."""
         ch, cw = color_shape[:2]
-        ih, iw = ir_gray.shape[:2]
-        # scale IR so its height ~ color height * scale factor, then center + offset
-        target_h = int(ch * self.scale)
-        target_w = int(iw * (target_h / ih))
-        resized = cv2.resize(ir_gray, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        canvas = np.zeros((ch, cw), np.uint8)
-        # top-left placement to center the IR image, plus manual offset
-        x0 = (cw - target_w) // 2 + self.dx
-        y0 = (ch - target_h) // 2 + self.dy
-        # compute overlapping region
-        sx0 = max(0, -x0); sy0 = max(0, -y0)
-        dx0 = max(0, x0);  dy0 = max(0, y0)
-        w = min(target_w - sx0, cw - dx0)
-        h = min(target_h - sy0, ch - dy0)
-        if w > 0 and h > 0:
-            canvas[dy0:dy0 + h, dx0:dx0 + w] = resized[sy0:sy0 + h, sx0:sx0 + w]
-        return canvas
+        self._ensure(ir_gray.shape, color_shape)
+        return cv2.warpAffine(ir_gray, self.M, (cw, ch), flags=cv2.INTER_LINEAR)
+
+    def nudge(self, dx=0, dy=0, dscale=0.0):
+        if self.M is None:
+            return
+        if dx or dy:
+            self.M[0, 2] += dx
+            self.M[1, 2] += dy
+        if dscale and self._color_shape is not None:
+            s = 1.0 + dscale
+            ch, cw = self._color_shape[:2]
+            c = np.array([cw / 2.0, ch / 2.0], np.float32)
+            old_t = self.M[:, 2].copy()
+            self.M[:, :2] *= s
+            self.M[:, 2] = s * old_t + (1.0 - s) * c
+
+    # -- automatic feature-based alignment --------------------------------
+    @staticmethod
+    def _prep(gray):
+        """Equalize contrast so near-IR and visible gradients are comparable."""
+        g = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return cv2.createCLAHE(2.0, (8, 8)).apply(g)
+
+    def _correspondences(self, ir_gray, color_bgr, ratio=0.8):
+        """Return matched (src_ir, dst_color) point lists for one frame pair."""
+        g_ir = self._prep(ir_gray)
+        g_col = self._prep(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY))
+        orb = cv2.ORB_create(2000, scaleFactor=1.2, nlevels=8)
+        k1, d1 = orb.detectAndCompute(g_ir, None)
+        k2, d2 = orb.detectAndCompute(g_col, None)
+        if d1 is None or d2 is None or len(k1) < 8 or len(k2) < 8:
+            return [], []
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+        src, dst = [], []
+        for pair in bf.knnMatch(d1, d2, k=2):
+            if len(pair) == 2 and pair[0].distance < ratio * pair[1].distance:
+                src.append(k1[pair[0].queryIdx].pt)
+                dst.append(k2[pair[0].trainIdx].pt)
+        return src, dst
+
+    def _solve(self, src, dst, min_matches, min_inliers) -> dict:
+        if len(src) < min_matches:
+            return {"ok": False, "matches": len(src), "inliers": 0,
+                    "reason": "too few matches"}
+        s = np.float32(src).reshape(-1, 1, 2)
+        d = np.float32(dst).reshape(-1, 1, 2)
+        M, inl = cv2.estimateAffinePartial2D(
+            s, d, method=cv2.RANSAC, ransacReprojThreshold=6.0,
+            maxIters=5000, confidence=0.999)
+        inliers = int(inl.sum()) if inl is not None else 0
+        if M is None or inliers < min_inliers:
+            return {"ok": False, "matches": len(src), "inliers": inliers,
+                    "reason": "no consensus"}
+        scale = float(np.sqrt(abs(M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0])))
+        if not (0.3 < scale < 5.0):
+            return {"ok": False, "matches": len(src), "inliers": inliers,
+                    "scale": scale, "reason": "implausible scale"}
+        self.M = M.astype(np.float32)
+        return {"ok": True, "matches": len(src), "inliers": inliers, "scale": scale}
+
+    def auto_align(self, ir_gray: np.ndarray, color_bgr: np.ndarray) -> dict:
+        """Single-frame align (used by live mode). Marginal but cheap."""
+        self._ensure(ir_gray.shape, color_bgr.shape)
+        src, dst = self._correspondences(ir_gray, color_bgr)
+        info = self._solve(src, dst, min_matches=12, min_inliers=8)
+        self.last_info = info
+        return info
+
+    def auto_align_pooled(self, pairs) -> dict:
+        """Pool correspondences across several frame pairs, then solve once.
+
+        The IR<->RGB geometry is constant, so true matches accumulate across
+        frames while wrong matches stay random - RANSAC locks on much more
+        reliably than it can from any single (cross-modal, noisy) frame.
+        """
+        if not pairs:
+            return {"ok": False, "matches": 0, "inliers": 0, "reason": "no frames"}
+        self._ensure(pairs[0][0].shape, pairs[0][1].shape)
+        src, dst = [], []
+        for ir, color in pairs:
+            s, d = self._correspondences(ir, color)
+            src.extend(s)
+            dst.extend(d)
+        info = self._solve(src, dst, min_matches=20, min_inliers=15)
+        info["frames"] = len(pairs)
+        self.last_info = info
+        return info
+
+    # -- persistence (the sensor geometry is fixed, so save it once) -------
+    def save(self, path, ir_shape, color_shape) -> bool:
+        if self.M is None:
+            return False
+        data = {
+            "M": self.M.tolist(),
+            "ir": [int(ir_shape[0]), int(ir_shape[1])],
+            "color": [int(color_shape[0]), int(color_shape[1])],
+        }
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+            return True
+        except OSError:
+            return False
+
+    def load(self, path, ir_shape, color_shape) -> bool:
+        """Load a saved transform only if it matches the current resolutions."""
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            return False
+        if (d.get("ir") != [int(ir_shape[0]), int(ir_shape[1])] or
+                d.get("color") != [int(color_shape[0]), int(color_shape[1])]):
+            return False
+        self.M = np.array(d["M"], np.float32)
+        self._color_shape = color_shape
+        return True
 
 
 def fuse(color_bgr: np.ndarray, ir_gray_aligned: np.ndarray,
