@@ -43,6 +43,19 @@ def _asset(name: str) -> str:
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__)))
     return os.path.join(base, "hellocam", "assets", name)
 
+
+def _set_app_id():
+    """Give the process an explicit AppUserModelID (Windows only). Without this,
+    running via python.exe makes the taskbar show Python's icon; setting our own
+    ID detaches the window so Windows uses the icon we set instead. No-op if the
+    call isn't available."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "HelloCam.WindowsHello.RGB.IR")
+    except Exception:
+        pass
+
 MODES = [
     ("ir",        "IR (raw grayscale)"),
     ("rgb",       "RGB webcam"),
@@ -97,6 +110,7 @@ class ViewerGUI:
         self._paused = False
         self._last_power_t = 0.0        # throttle power checks (root.state is slow)
 
+        _set_app_id()                   # so the taskbar uses our icon, not python's
         self.root = tk.Tk()
         self.root.title("HelloCam - RGB + IR")
         self.root.geometry("980x680")
