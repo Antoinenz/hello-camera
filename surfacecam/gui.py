@@ -307,12 +307,12 @@ class ViewerGUI:
         Returns True when paused (caller should skip rendering)."""
         paused, grace, reason = self._pause_request()
         now = time.time()
+        self._paused = paused       # set before any _show_badge so it hides FPS
         if paused:
             if self._pause_since is None:       # just entered pause
                 self._pause_since = now
                 if reason == "frozen" and self._last_frame is not None:
                     self._show_badge("FROZEN")
-                self.status.config(text=f"{reason} - paused")
             elif not self._cams_off and now - self._pause_since > grace:
                 self.cams.suspend()             # power cameras down (silently)
                 self._cams_off = True
@@ -385,7 +385,7 @@ class ViewerGUI:
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
         disp = P.apply_aspect(frame, cw, ch, self.aspect_var.get())
-        if self.fps_var.get():
+        if self.fps_var.get() and not self._paused:
             self._draw_fps(disp)
         rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
         self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
