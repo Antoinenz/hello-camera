@@ -98,6 +98,7 @@ class ViewerGUI:
         self.aspect_var = tk.StringVar(value="fit")
         self.statusbar_var = tk.BooleanVar(value=True)
         self.fps_var = tk.BooleanVar(value=True)
+        self.mirror_var = tk.BooleanVar(value=False)
         self.autoalign_live_var = tk.BooleanVar(value=False)
         self.ir_source_var = tk.StringVar(value=self.cams.ir_mode)
         self.autopause_min_var = tk.BooleanVar(value=True)
@@ -137,6 +138,8 @@ class ViewerGUI:
 
         view.add_separator()
         view.add_checkbutton(label="Show FPS overlay", variable=self.fps_var)
+        view.add_checkbutton(label="Mirror (flip horizontally)", accelerator="M",
+                             variable=self.mirror_var)
 
         ir_menu = tk.Menu(view, tearoff=0)
         ir_menu.add_radiobutton(label="Active (emitter on, anti-flicker)",
@@ -267,6 +270,8 @@ class ViewerGUI:
         r.bind("f", lambda e: self.aspect_var.set("fit"))
         r.bind("l", lambda e: self.aspect_var.set("fill"))
         r.bind("t", lambda e: self.aspect_var.set("stretch"))
+        r.bind("m", lambda e: self.mirror_var.set(not self.mirror_var.get()))
+        r.bind("M", lambda e: self.mirror_var.set(not self.mirror_var.get()))
         r.bind("<Left>", lambda e: self._nudge(dx=-4))
         r.bind("<Right>", lambda e: self._nudge(dx=4))
         r.bind("<Up>", lambda e: self._nudge(dy=-4))
@@ -525,6 +530,8 @@ class ViewerGUI:
                      f"run: python scripts/download_model.py {key}")
 
     def _show(self, frame):
+        if self.mirror_var.get():
+            frame = cv2.flip(frame, 1)          # horizontal flip (selfie view)
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
         disp = P.apply_aspect(frame, cw, ch, self.aspect_var.get())
@@ -785,6 +792,7 @@ class ViewerGUI:
             "Controls",
             "Modes:        keys 1-7  (or View > Mode)\n"
             "Aspect:       F fit / L fill / T stretch  (or View > Aspect)\n"
+            "Mirror:       M  (flip horizontally, selfie view)\n"
             "Align by hand: arrow keys move, [ ] zoom the IR overlay\n"
             "               (auto-saved; reloads next launch)\n"
             "Refine align: E  (ECC polish of the current alignment)\n"
