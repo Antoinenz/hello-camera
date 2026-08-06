@@ -51,10 +51,30 @@ The default viewer is a native Windows window with a **menu bar**:
 - **View → IR source** — which strobe phase to show (see *IR source* below):
   **Active** (emitter, anti-flicker; default), **Passive** (ambient IR, emitter
   excluded), or **Raw** (unfiltered strobe)
+- **View → Freeze / resume** (**Space**) — freeze the frame; see *Power saving*
+- **View → Auto-pause when minimized** — pause work while minimized (default on)
 - **Capture** — Snapshot, Start/Stop recording, Open captures folder
 - **Overlay** — **Auto-align** the IR onto the RGB feed, plus manual
   move / zoom / opacity for the fusion modes
 - **Help** — controls & about
+
+### Power saving
+
+The app powers down what it isn't using:
+
+- **Unused camera off** — each mode only needs some sensors (IR modes need the IR
+  camera, *RGB* needs the color camera, fusion needs both). After a few seconds
+  in a mode, the camera it doesn't use is stopped (and for IR, the emitter with
+  it). Switching to a mode that needs it powers it straight back on.
+- **Freeze** (**Space**) — holds the current frame and stops processing. If it
+  stays frozen for ~10s, both cameras are suspended entirely; pressing Space
+  again resumes them.
+- **Auto-pause when minimized** (on by default) — minimizing pauses rendering
+  immediately and suspends the cameras a few seconds later; restoring the window
+  brings them back.
+
+Suspending keeps the capture device initialised, so resume is quick — it doesn't
+re-run the full open sequence.
 
 ### Aligning the IR overlay
 

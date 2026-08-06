@@ -35,6 +35,17 @@ MODES = [
 ]
 ASPECTS = ["fit", "fill", "stretch"]
 
+# which cameras each mode needs -> unused ones get powered down
+MODE_SOURCES = {
+    "ir": (False, True), "iredges": (False, True), "proximity": (False, True),
+    "rgb": (True, False),
+    "side": (True, True), "fuse": (True, True), "edgefuse": (True, True),
+}
+
+FREEZE_OFF_SECS = 10.0      # frozen this long -> power cameras down
+MINIMIZE_OFF_SECS = 3.0     # minimised this long -> power cameras down
+UNUSED_DISABLE_SECS = 4.0   # a mode's unused camera off after this long
+
 
 class ViewerGUI:
     def __init__(self, out_dir: str = "captures", calib_path: str = "calibration.json"):
@@ -55,6 +66,15 @@ class ViewerGUI:
         self._last_ver = -1
         self._save_after_id = None      # debounce for auto-saving manual nudges
         self._photo = None  # keep a ref so Tk doesn't GC the image
+        # power management state
+        self.frozen = False
+        self._pause_since = None        # when the current pause began
+        self._cams_off = False          # cameras suspended for power saving
+        self._last_frame = None         # last rendered frame (for freeze badge)
+        self._color_unused_since = None
+        self._ir_unused_since = None
+        self._paused = False
+        self._last_power_t = 0.0        # throttle power checks (root.state is slow)
 
         self.root = tk.Tk()
         self.root.title("SurfaceCam - RGB + IR")
@@ -69,6 +89,7 @@ class ViewerGUI:
         self.fps_var = tk.BooleanVar(value=True)
         self.autoalign_live_var = tk.BooleanVar(value=False)
         self.ir_source_var = tk.StringVar(value=self.cams.ir_mode)
+        self.autopause_min_var = tk.BooleanVar(value=True)
 
         self._build_menu()
         self._build_widgets()
@@ -116,6 +137,11 @@ class ViewerGUI:
         view.add_checkbutton(label="Show status bar", variable=self.statusbar_var,
                              command=self._toggle_statusbar)
         view.add_command(label="Reset IR alignment", command=self._reset_align)
+        view.add_separator()
+        view.add_command(label="Freeze / resume", accelerator="Space",
+                         command=self._toggle_freeze)
+        view.add_checkbutton(label="Auto-pause when minimized",
+                             variable=self.autopause_min_var)
         view.add_separator()
         view.add_command(label="Exit", accelerator="Esc", command=self._on_close)
         menubar.add_cascade(label="View", menu=view)
@@ -199,6 +225,7 @@ class ViewerGUI:
         r.bind("A", lambda e: self._auto_align_once())
         r.bind("e", lambda e: self._refine_once())
         r.bind("E", lambda e: self._refine_once())
+        r.bind("<space>", lambda e: self._toggle_freeze())
         r.bind("<Escape>", lambda e: self._on_close())
         r.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -213,6 +240,16 @@ class ViewerGUI:
 
     def _tick(self):
         try:
+            # power checks call root.state() (slow), so run them at ~5Hz, not
+            # every tick; freeze via spacebar applies instantly via _toggle_freeze
+            now = time.time()
+            if now - self._last_power_t >= 0.2:
+                self._last_power_t = now
+                self._paused = self._manage_power()
+                if not self._paused:
+                    self._manage_sources()
+            if self._paused:
+                return self._reschedule()   # paused: skip all rendering/processing
             # render only when the pump has a new frame; otherwise just poll
             ver = self.cams.frame_ver
             if ver != self._last_ver:
@@ -237,6 +274,7 @@ class ViewerGUI:
                                  f"{info['scale']:.2f}  (saved)")
                 frame = self._render(color, ir)
                 if frame is not None:
+                    self._last_frame = frame
                     self._update_fps()
                     if self.writer is not None:
                         self._write(frame)
@@ -244,7 +282,82 @@ class ViewerGUI:
                     self._update_status(frame)
         except Exception as e:  # keep the loop alive, surface once
             self.status.config(text=f"error: {e}")
+        self._reschedule()
+
+    def _reschedule(self):
         self.root.after(2, self._tick)
+
+    # -- power management --------------------------------------------------
+    def _is_minimized(self) -> bool:
+        try:
+            return self.root.state() == "iconic"
+        except tk.TclError:
+            return False
+
+    def _pause_request(self):
+        """Return (paused, grace_secs, reason) for the current state."""
+        if self.frozen:
+            return True, FREEZE_OFF_SECS, "frozen"
+        if self.autopause_min_var.get() and self._is_minimized():
+            return True, MINIMIZE_OFF_SECS, "minimized"
+        return False, 0.0, ""
+
+    def _manage_power(self) -> bool:
+        """Handle freeze / minimize pausing and camera power-down.
+        Returns True when paused (caller should skip rendering)."""
+        paused, grace, reason = self._pause_request()
+        now = time.time()
+        if paused:
+            if self._pause_since is None:       # just entered pause
+                self._pause_since = now
+                if reason == "frozen" and self._last_frame is not None:
+                    self._show_badge("FROZEN")
+                self.status.config(text=f"{reason} - paused")
+            elif not self._cams_off and now - self._pause_since > grace:
+                self.cams.suspend()             # power cameras down
+                self._cams_off = True
+                if reason == "frozen":
+                    self._show_badge("FROZEN - cameras off")
+                self.status.config(text=f"{reason} - cameras off to save power")
+            return True
+        # not paused: resume if we were
+        if self._pause_since is not None:
+            self._pause_since = None
+            if self._cams_off:
+                self.cams.resume()
+                self._cams_off = False
+                self.status.config(text="resumed")
+            self._last_ver = -1                 # force a fresh render
+        return False
+
+    def _manage_sources(self):
+        """Power down whichever camera the current mode doesn't need (after a
+        short grace, so flipping modes doesn't churn the hardware)."""
+        need_c, need_i = MODE_SOURCES.get(self.mode_var.get(), (True, True))
+        now = time.time()
+        self._color_unused_since = None if need_c else (
+            self._color_unused_since or now)
+        self._ir_unused_since = None if need_i else (
+            self._ir_unused_since or now)
+        want_c = need_c or (now - self._color_unused_since < UNUSED_DISABLE_SECS)
+        want_i = need_i or (now - self._ir_unused_since < UNUSED_DISABLE_SECS)
+        self.cams.request_sources(want_c, want_i)
+
+    def _toggle_freeze(self):
+        self.frozen = not self.frozen
+        self._last_power_t = time.time()
+        self._paused = self._manage_power()     # apply immediately, don't wait for poll
+
+    def _show_badge(self, text):
+        if self._last_frame is None:
+            return
+        f = self._last_frame.copy()
+        h, w = f.shape[:2]
+        cv2.rectangle(f, (0, h // 2 - 34), (w, h // 2 + 20), (0, 0, 0), -1)
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
+        cv2.putText(f, text, ((w - tw) // 2, h // 2 + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 255, 180), 2, cv2.LINE_AA)
+        self._show(f)
 
     # ------------------------------------------------------------------
     def _render(self, color, ir):
@@ -490,6 +603,7 @@ class ViewerGUI:
             "Opacity:      + / -\n"
             "Snapshot:     Ctrl+S\n"
             "Record:       Ctrl+R\n"
+            "Freeze:       Space  (cameras power down if held >10s)\n"
             "Quit:         Esc\n\n"
             "Tip: the IR and RGB cameras are fixed, so align once and it "
             "sticks. If auto-align misses, nudge it close by hand and press E.")

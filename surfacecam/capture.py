@@ -124,10 +124,21 @@ class SurfaceCameras:
         self._lock = threading.Lock()
         self._cache_color: np.ndarray | None = None
         self._cache_ir: np.ndarray | None = None
+        # power management: desired per-source enable (mode-driven) and a global
+        # suspend (freeze / minimised). The pump reconciles the actual reader
+        # streaming state to these, so unused cameras are powered down.
+        self._want_color = True
+        self._want_ir = True
+        self._suspend = False
+        self._color_streaming = False
+        self._ir_streaming = False
 
     # -- public sync API ---------------------------------------------------
     def open(self):
         asyncio.run(self._open_async())
+        # _open_async starts whatever readers exist
+        self._color_streaming = self._color.reader is not None
+        self._ir_streaming = self._ir.reader is not None
 
     def read_color(self) -> np.ndarray | None:
         return self._read(self._color, bitmap_to_bgr) if self.want_color else None
@@ -174,27 +185,90 @@ class SurfaceCameras:
         except Exception:
             pass
 
+    # -- power management (mode-driven enable + global suspend) -----------
+    def request_sources(self, color: bool, ir: bool):
+        """Set which sources the current use actually needs; the pump powers
+        down the others (and powers them back up on demand)."""
+        self._want_color = bool(color)
+        self._want_ir = bool(ir)
+
+    def suspend(self):
+        """Stop streaming both cameras (emitter off) while keeping the device
+        initialised, so it resumes cheaply. Used for freeze / minimise."""
+        self._suspend = True
+
+    def resume(self):
+        self._suspend = False
+
+    @property
+    def suspended(self) -> bool:
+        return self._suspend
+
+    @property
+    def color_on(self) -> bool:
+        return self._color_streaming
+
+    @property
+    def ir_on(self) -> bool:
+        return self._ir_streaming
+
+    def _reconcile(self, ev_loop):
+        """Bring actual reader streaming in line with desired state. Runs only
+        in the pump thread, so readers are touched by exactly one thread."""
+        want_c = self.want_color and self._want_color and not self._suspend
+        want_i = self.want_ir and self._want_ir and not self._suspend
+        if self._color.reader is not None and want_c != self._color_streaming:
+            op = (self._color.reader.start_async() if want_c
+                  else self._color.reader.stop_async())
+            ev_loop.run_until_complete(_await_op(op))
+            self._color_streaming = want_c
+            if not want_c:
+                with self._lock:
+                    self._cache_color = None
+        if self._ir.reader is not None and want_i != self._ir_streaming:
+            op = (self._ir.reader.start_async() if want_i
+                  else self._ir.reader.stop_async())
+            ev_loop.run_until_complete(_await_op(op))
+            self._ir_streaming = want_i
+            if not want_i:
+                self._last_ir = None            # reset strobe tracking
+                with self._lock:
+                    self._cache_ir = None
+
     # -- background capture pump ------------------------------------------
     def start_pump(self, interval: float = 0.002):
         """Continuously pull frames off the sensor on a background thread so
         capture runs at the full sensor rate regardless of how fast the render
-        loop consumes them. Consumers then read latest_color()/latest_ir()."""
+        loop consumes them. Consumers then read latest_color()/latest_ir().
+        The pump also owns reader start/stop (see _reconcile)."""
         if self._pump is not None:
             return
         self._pump_stop = threading.Event()
 
         def loop():
-            while not self._pump_stop.is_set():
-                c = self.read_color() if self.want_color else None
-                ir = self.read_ir() if self.want_ir else None
-                if c is not None or ir is not None:
-                    with self._lock:
-                        if c is not None:
-                            self._cache_color = c
-                        if ir is not None:
-                            self._cache_ir = ir
-                        self.frame_ver += 1
-                time.sleep(interval)
+            ev_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(ev_loop)
+            try:
+                while not self._pump_stop.is_set():
+                    try:
+                        self._reconcile(ev_loop)
+                    except Exception:
+                        pass
+                    if self._suspend:
+                        time.sleep(0.1)         # idle: cameras off
+                        continue
+                    c = self.read_color() if self._color_streaming else None
+                    ir = self.read_ir() if self._ir_streaming else None
+                    if c is not None or ir is not None:
+                        with self._lock:
+                            if c is not None:
+                                self._cache_color = c
+                            if ir is not None:
+                                self._cache_ir = ir
+                            self.frame_ver += 1
+                    time.sleep(interval)
+            finally:
+                ev_loop.close()
 
         self._pump = threading.Thread(target=loop, name="ir-pump", daemon=True)
         self._pump.start()
@@ -203,7 +277,7 @@ class SurfaceCameras:
         if self._pump is None:
             return
         self._pump_stop.set()
-        self._pump.join(timeout=1.0)
+        self._pump.join(timeout=2.0)
         self._pump = None
 
     def latest_color(self) -> np.ndarray | None:
@@ -319,3 +393,8 @@ class SurfaceCameras:
 def _check(status, name):
     if status != MediaFrameReaderStartStatus.SUCCESS:
         raise RuntimeError(f"Failed to start {name} reader: {status!r}")
+
+
+async def _await_op(op):
+    """Await a WinRT IAsyncOperation from a thread's own event loop."""
+    return await op
