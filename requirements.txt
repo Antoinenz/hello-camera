@@ -2,6 +2,7 @@ winsdk>=1.0.0b10
 numpy>=1.24
 opencv-python>=4.8
 Pillow>=10.0        # image display in the native Tkinter GUI
+pyvirtualcam>=0.10  # optional: "Send to virtual camera" (needs OBS installed)
 
 # Optional: ML monocular depth estimation (large download, ~2GB).
 # Uncomment and `pip install -r requirements.txt` to enable the future

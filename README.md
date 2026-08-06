@@ -172,12 +172,28 @@ an amount that depends on distance (parallax). The **Depth map** mode
   with distance, so IR brightness is a rough closeness proxy. Works in the dark
   (the emitter lights the scene) but can't tell a bright near object from a
   bright far one.
+- **Portrait (subject cutout + stereo)** — for people/objects against a wall:
+  the IR image cleanly segments a close subject (bright, from IR falloff), so it
+  uses that as a crisp cutout mask and colours it by the stereo disparity
+  (near/far *within* the subject) while dimming the background. Cleaner-looking
+  than raw stereo for portraits.
 - **Auto** *(default)* — uses stereo when the color image has enough contrast,
   and falls back to proximity in low light (where the color sensor goes near-
   black and stereo has nothing to match). The status bar shows which is active.
 
 ML monocular depth (MiDaS) remains a possible future opt-in (needs PyTorch,
 ~2GB) and is left commented in `requirements.txt`.
+
+## Virtual camera
+
+**Capture → Send to virtual camera** streams the current view (any mode — IR,
+fusion, depth, …) to a virtual webcam that other apps can pick up, so you can
+use the IR or fused feed in Zoom, Discord, Teams, OBS, etc.
+
+It uses the **OBS Virtual Camera** as the backend (via `pyvirtualcam`), so OBS
+Studio must be installed once (its virtual-camera DirectShow filter is what
+apps see). Output is 1280×720; select "OBS Virtual Camera" as the camera in the
+target app.
 
 ## IR transmit (proof-of-concept)
 

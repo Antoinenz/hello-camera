@@ -24,6 +24,14 @@ from PIL import Image, ImageTk
 from .capture import SurfaceCameras
 from . import processing as P
 
+try:
+    import pyvirtualcam
+    HAVE_VCAM = True
+except Exception:
+    HAVE_VCAM = False
+
+VCAM_W, VCAM_H, VCAM_FPS = 1280, 720, 30
+
 MODES = [
     ("ir",        "IR (raw grayscale)"),
     ("rgb",       "RGB webcam"),
@@ -91,6 +99,8 @@ class ViewerGUI:
         self.ir_source_var = tk.StringVar(value=self.cams.ir_mode)
         self.autopause_min_var = tk.BooleanVar(value=True)
         self.depth_method_var = tk.StringVar(value="auto")
+        self.vcam_var = tk.BooleanVar(value=False)
+        self.vcam = None
 
         self._build_menu()
         self._build_widgets()
@@ -140,6 +150,8 @@ class ViewerGUI:
                                    value="auto", variable=self.depth_method_var)
         depth_menu.add_radiobutton(label="Stereo (RGB<->IR parallax)",
                                    value="stereo", variable=self.depth_method_var)
+        depth_menu.add_radiobutton(label="Portrait (subject cutout + stereo)",
+                                   value="portrait", variable=self.depth_method_var)
         depth_menu.add_radiobutton(label="Proximity (IR intensity)",
                                    value="proximity", variable=self.depth_method_var)
         view.add_cascade(label="Depth method", menu=depth_menu)
@@ -164,6 +176,9 @@ class ViewerGUI:
                         command=self._toggle_record)
         self._cap_menu = cap
         cap.add_separator()
+        state = "normal" if HAVE_VCAM else "disabled"
+        cap.add_checkbutton(label="Send to virtual camera", variable=self.vcam_var,
+                            command=self._toggle_vcam, state=state)
         cap.add_command(label="Open captures folder", command=self._open_folder)
         menubar.add_cascade(label="Capture", menu=cap)
 
@@ -343,7 +358,7 @@ class ViewerGUI:
         mode = self.mode_var.get()
         need_c, need_i = MODE_SOURCES.get(mode, (True, True))
         # the depth mode needs the color camera too when it may use stereo
-        if mode == "proximity" and self.depth_method_var.get() in ("stereo", "auto"):
+        if mode == "proximity" and self.depth_method_var.get() != "proximity":
             need_c = True
         now = time.time()
         self._color_unused_since = None if need_c else (
@@ -399,15 +414,18 @@ class ViewerGUI:
         if ir is None:
             return None
         method = self.depth_method_var.get()
-        # need a color frame for stereo; fall back to proximity without one
+        # need a color frame for stereo/portrait; fall back to proximity without
         if method == "proximity" or color is None:
             self._depth_note("proximity")
             return P.proximity_map(ir)
         if method == "auto" and P.depth_confidence(color) < 0.5:
             self._depth_note("auto: proximity (too dark for stereo)")
             return P.proximity_map(ir)      # too dark for stereo -> IR intensity
-        self._depth_note("stereo" if method == "stereo" else "auto: stereo")
         aligned = self.aligner.warp_ir_to_color(ir, color.shape)
+        if method == "portrait":
+            self._depth_note("portrait")
+            return P.portrait_depth(color, aligned)
+        self._depth_note("stereo" if method == "stereo" else "auto: stereo")
         return P.stereo_depth(color, aligned)
 
     def _depth_note(self, note):
@@ -424,6 +442,42 @@ class ViewerGUI:
         rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
         self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
         self.canvas.config(image=self._photo)
+        if self.vcam is not None:
+            self._send_vcam(frame)
+
+    def _send_vcam(self, frame):
+        try:
+            v = P.apply_aspect(frame, VCAM_W, VCAM_H, "fit")
+            self.vcam.send(cv2.cvtColor(v, cv2.COLOR_BGR2RGB))
+        except Exception as e:
+            self.status.config(text=f"virtual camera error: {e}")
+            self._close_vcam()
+            self.vcam_var.set(False)
+
+    def _toggle_vcam(self):
+        if self.vcam_var.get():
+            try:
+                self.vcam = pyvirtualcam.Camera(
+                    width=VCAM_W, height=VCAM_H, fps=VCAM_FPS,
+                    fmt=pyvirtualcam.PixelFormat.RGB)
+                self.status.config(
+                    text=f"virtual camera on: '{self.vcam.device}' "
+                         f"(select it in Zoom/Discord/OBS)")
+            except Exception as e:
+                self.vcam = None
+                self.vcam_var.set(False)
+                self.status.config(text=f"virtual camera unavailable: {e}")
+        else:
+            self._close_vcam()
+            self.status.config(text="virtual camera off")
+
+    def _close_vcam(self):
+        if self.vcam is not None:
+            try:
+                self.vcam.close()
+            except Exception:
+                pass
+            self.vcam = None
 
     def _draw_fps(self, disp):
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -652,6 +706,7 @@ class ViewerGUI:
         if self.writer is not None:
             self.writer.release()
             self.writer = None
+        self._close_vcam()
         try:
             self.cams.close()
         except Exception:

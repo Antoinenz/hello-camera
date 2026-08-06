@@ -59,44 +59,59 @@ def depth_confidence(color_bgr: np.ndarray) -> float:
     return float(np.clip((std - 10.0) / 30.0, 0.0, 1.0))
 
 
-def stereo_depth(color_bgr: np.ndarray, ir_gray_aligned: np.ndarray,
-                 work_w: int = 360, colormap: int = cv2.COLORMAP_TURBO,
-                 return_conf: bool = False):
-    """Relative depth from RGB<->IR parallax.
+def _guided_filter(guide: np.ndarray, src: np.ndarray, r: int, eps: float):
+    """Edge-aware smoothing of `src` steered by `guide` (both float32, same
+    size). Makes the depth follow the guide image's edges (He et al. 2010)."""
+    g = guide.astype(np.float32)
+    p = src.astype(np.float32)
+    box = (r, r)
+    mean_g = cv2.boxFilter(g, -1, box)
+    mean_p = cv2.boxFilter(p, -1, box)
+    mean_gp = cv2.boxFilter(g * p, -1, box)
+    cov_gp = mean_gp - mean_g * mean_p
+    var_g = cv2.boxFilter(g * g, -1, box) - mean_g * mean_g
+    a = cov_gp / (var_g + eps)
+    b = mean_p - a * mean_g
+    mean_a = cv2.boxFilter(a, -1, box)
+    mean_b = cv2.boxFilter(b, -1, box)
+    return mean_a * g + mean_b
 
-    The IR and color sensors sit a few cm apart, so after the global alignment
-    is applied (ir_gray_aligned), whatever displacement remains between the two
-    views is stereo disparity: it's ~0 at the depth the alignment was tuned for,
-    and grows with distance from that plane. We recover it with dense optical
-    flow (in a CLAHE'd, gradient-friendly domain for cross-modal robustness),
-    project the flow onto its dominant axis (the epipolar/baseline direction),
-    and false-color the signed result.
 
-    Returns a BGR depth image (and, if return_conf, a 0..1 confidence scalar
-    for auto mode - low when the scene lacks the texture stereo needs).
-    """
+def _grad(gray):
+    """Gradient-magnitude image: edges match across IR<->visible even though
+    raw intensities don't, so flow tracks real structure instead of mush."""
+    g = _clahe(gray)
+    g = cv2.GaussianBlur(g, (3, 3), 0)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, 3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, 3)
+    m = cv2.magnitude(gx, gy)
+    return cv2.normalize(m, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+
+def _disparity_field(color_bgr, ir_gray_aligned, work_w):
+    """Shared core: estimate a signed disparity field (relative depth) from the
+    RGB<->IR parallax. Returns (disp float32, mask bool, igray, ws) at working
+    resolution. disp is guided-filter sharpened; larger = one end of depth."""
     ch, cw = color_bgr.shape[:2]
     s = work_w / cw
     ws = (work_w, max(1, int(ch * s)))
-    cg = _clahe(cv2.resize(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY), ws))
-    ig = _clahe(cv2.resize(ir_gray_aligned, ws))
+    cg = cv2.resize(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY), ws)
+    igray = cv2.resize(ir_gray_aligned, ws)
     mask = cv2.resize(ir_gray_aligned, ws, interpolation=cv2.INTER_NEAREST) > 0
 
+    # flow on gradient images (cross-modal robust), smaller window = sharper
     flow = cv2.calcOpticalFlowFarneback(
-        cg, ig, None, pyr_scale=0.5, levels=4, winsize=21,
-        iterations=3, poly_n=7, poly_sigma=1.5, flags=0)
+        _grad(cg), _grad(igray), None, pyr_scale=0.5, levels=4, winsize=13,
+        iterations=4, poly_n=5, poly_sigma=1.1, flags=0)
     fx, fy = flow[..., 0], flow[..., 1]
     mag = np.sqrt(fx * fx + fy * fy)
 
-    # texture confidence: stereo is only trustworthy where there are gradients
     gx = cv2.Sobel(cg, cv2.CV_32F, 1, 0, 3)
     gy = cv2.Sobel(cg, cv2.CV_32F, 0, 1, 3)
     tex = cv2.GaussianBlur(np.sqrt(gx * gx + gy * gy), (0, 0), 3)
-    conf_map = (tex > np.percentile(tex[mask], 50) if mask.any() else tex > 1e9)
-    good = mask & conf_map & (mag < np.percentile(mag[mask], 98) if mask.any() else mag < 0)
-
-    # dominant flow (baseline) direction from confident vectors, via PCA
-    if int(good.sum()) > 50:
+    if mask.any():
+        good = mask & (tex > np.percentile(tex[mask], 60)) & \
+            (mag < np.percentile(mag[mask], 98))
         vecs = np.stack([fx[good], fy[good]], 1)
         vecs = vecs[np.linalg.norm(vecs, axis=1) > 0.3]
     else:
@@ -105,28 +120,74 @@ def stereo_depth(color_bgr: np.ndarray, ir_gray_aligned: np.ndarray,
         vv = vecs - vecs.mean(0)
         _, _, vt = np.linalg.svd(vv, full_matrices=False)
         axis = vt[0]
-        # SVD axis sign is arbitrary and would flip near/far colors between
-        # frames; the baseline is fixed, so pin a stable convention.
         if axis[0] < 0 or (axis[0] == 0 and axis[1] < 0):
-            axis = -axis
+            axis = -axis                          # stable sign (fixed baseline)
         disp = fx * axis[0] + fy * axis[1]        # signed projection = disparity
     else:
-        disp = mag                                 # fallback: unsigned magnitude
+        disp = mag
 
-    disp = cv2.medianBlur(disp.astype(np.float32), 5)
+    disp = disp.astype(np.float32)
+    guide = _clahe(igray).astype(np.float32) / 255.0
+    disp = _guided_filter(guide, disp, r=12, eps=1e-3)
+    return disp, mask, igray, ws
+
+
+def _colorize(disp, mask, cw, ch, colormap, pct=(5, 95)):
     if mask.any():
-        lo, hi = np.percentile(disp[mask], (5, 95))
+        lo, hi = np.percentile(disp[mask], pct)
     else:
         lo, hi = 0.0, 1.0
     norm = np.clip((disp - lo) / max(hi - lo, 1e-3), 0, 1)
-    d8 = (norm * 255).astype(np.uint8)
-    heat = cv2.applyColorMap(d8, colormap)
+    heat = cv2.applyColorMap((norm * 255).astype(np.uint8), colormap)
     heat[~mask] = 0
-    heat = cv2.resize(heat, (cw, ch), interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(heat, (cw, ch), interpolation=cv2.INTER_NEAREST)
 
+
+def stereo_depth(color_bgr: np.ndarray, ir_gray_aligned: np.ndarray,
+                 work_w: int = 400, colormap: int = cv2.COLORMAP_TURBO,
+                 return_conf: bool = False):
+    """Relative depth from RGB<->IR parallax (dense flow on gradient images,
+    projected onto the baseline axis, guided-filter sharpened). Relative, not
+    metric. Returns a BGR depth image (and a 0..1 confidence if return_conf)."""
+    ch, cw = color_bgr.shape[:2]
+    disp, mask, _, _ = _disparity_field(color_bgr, ir_gray_aligned, work_w)
+    heat = _colorize(disp, mask, cw, ch, colormap)
     if return_conf:
         return heat, depth_confidence(color_bgr)
     return heat
+
+
+def portrait_depth(color_bgr: np.ndarray, ir_gray_aligned: np.ndarray,
+                   work_w: int = 400, colormap: int = cv2.COLORMAP_TURBO):
+    """Subject-aware depth for portraits: the IR image already segments a close
+    subject cleanly (bright, from IR falloff), so use that as the subject mask
+    and colour it by the stereo disparity (near/far *within* the subject),
+    while pushing the background to the far end. Cleaner-looking than raw stereo
+    for people/objects against a wall."""
+    ch, cw = color_bgr.shape[:2]
+    disp, mask, igray, ws = _disparity_field(color_bgr, ir_gray_aligned, work_w)
+
+    # subject = bright IR region (Otsu on the in-FOV pixels)
+    ig8 = cv2.normalize(igray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    ig8 = cv2.GaussianBlur(ig8, (5, 5), 0)
+    thr, _ = cv2.threshold(ig8[mask] if mask.any() else ig8, 0, 255,
+                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    subject = mask & (ig8 >= thr)
+    subject = cv2.morphologyEx(subject.astype(np.uint8), cv2.MORPH_OPEN,
+                               np.ones((5, 5), np.uint8)).astype(bool)
+
+    if subject.sum() > 200:
+        lo, hi = np.percentile(disp[subject], (5, 95))
+    else:
+        lo, hi = float(disp[mask].min()) if mask.any() else 0.0, 1.0
+    norm = np.clip((disp - lo) / max(hi - lo, 1e-3), 0, 1)
+    norm[~subject] = 0.0                       # background -> far end
+    heat = cv2.applyColorMap((norm * 255).astype(np.uint8), colormap)
+    heat[~mask] = 0
+    # dim the (non-subject) background so the subject pops
+    bg = mask & ~subject
+    heat[bg] = (heat[bg] * 0.35).astype(np.uint8)
+    return cv2.resize(heat, (cw, ch), interpolation=cv2.INTER_NEAREST)
 
 
 class Aligner:
