@@ -23,7 +23,7 @@ from PIL import Image, ImageTk
 
 from .capture import SurfaceCameras
 from . import processing as P
-from .mldepth import MLDepth
+from .mldepth import MLDepth, MODELS as ML_MODELS, DEFAULT_MODEL as ML_DEFAULT
 
 try:
     import pyvirtualcam
@@ -62,7 +62,7 @@ class ViewerGUI:
         self.calib_path = calib_path
         self._calib_tried = False
         self.stereo_calib = P.load_stereo_calib("captures/stereo_calib.npz")
-        self.mldepth = MLDepth()
+        self.mldepth = MLDepth(ML_DEFAULT)
         self.cams = SurfaceCameras(color=True, ir=True)
         self.aligner = P.Aligner()
         self.alpha = 0.5
@@ -102,6 +102,7 @@ class ViewerGUI:
         self.ir_source_var = tk.StringVar(value=self.cams.ir_mode)
         self.autopause_min_var = tk.BooleanVar(value=True)
         self.depth_method_var = tk.StringVar(value="auto")
+        self.ml_model_var = tk.StringVar(value=ML_DEFAULT)
         self.vcam_var = tk.BooleanVar(value=False)
         self.vcam = None
 
@@ -166,6 +167,12 @@ class ViewerGUI:
         depth_menu.add_radiobutton(label="Proximity (IR intensity)",
                                    value="proximity", variable=self.depth_method_var)
         view.add_cascade(label="Depth method", menu=depth_menu)
+
+        mlm = tk.Menu(view, tearoff=0)
+        for key, spec in ML_MODELS.items():
+            mlm.add_radiobutton(label=spec["label"], value=key,
+                                variable=self.ml_model_var, command=self._set_ml_model)
+        view.add_cascade(label="ML depth model", menu=mlm)
 
         view.add_checkbutton(label="Show status bar", variable=self.statusbar_var,
                              command=self._toggle_statusbar)
@@ -477,6 +484,16 @@ class ViewerGUI:
 
     def _depth_note(self, note):
         self._depth_active = note        # shown in the status bar (see _update_status)
+
+    def _set_ml_model(self):
+        key = self.ml_model_var.get()
+        self.mldepth.set_model(key)
+        if self.mldepth.available:
+            self.status.config(text=f"ML model: {ML_MODELS[key]['label']} (loading...)")
+        else:
+            self.status.config(
+                text=f"ML model '{key}' not downloaded - "
+                     f"run: python scripts/download_model.py {key}")
 
     def _show(self, frame):
         cw = max(1, self.canvas.winfo_width())

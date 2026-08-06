@@ -170,6 +170,9 @@ offers several estimators:
     net keys on structure, not colour), so you still get depth. The status bar
     shows `ML RGB` or `ML IR`. The IR camera powers down in good light and back
     on in the dark.
+  - **Two models** (`View → ML depth model`): *MiDaS small* (fast, ~37ms) is the
+    default; *Depth Anything V2* (`~130ms`, ~8fps) is noticeably sharper. Grab
+    both with `python scripts/download_model.py`.
 - **Stereo (parallax)** — the color and IR sensors sit a few cm apart (a real
   stereo baseline), so their views disagree by an amount that depends on
   distance. After the IR is aligned onto the

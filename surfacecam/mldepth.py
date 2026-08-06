@@ -16,12 +16,29 @@ import os
 import cv2
 import numpy as np
 
-MODEL_PATH = os.path.join("models", "midas_small.onnx")
-MODEL_URL = "https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"
-
 _MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 _STD = np.array([0.229, 0.224, 0.225], np.float32)
-_SIZE = 256                                      # MiDaS-small input is 256x256
+
+# Selectable depth models. Both use ImageNet normalisation; output is a dense
+# map where larger = nearer. `size` must be a multiple of 14 for DINOv2 models.
+MODELS = {
+    "midas_small": {
+        "label": "MiDaS small (fast)",
+        "file": "midas_small.onnx", "size": 256,
+        "url": "https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx",
+    },
+    "depth_anything_v2_small": {
+        "label": "Depth Anything V2 (sharper, slower)",
+        "file": "depth_anything_v2_small.onnx", "size": 266,
+        "url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx",
+    },
+}
+DEFAULT_MODEL = "midas_small"
+
+
+def _model_path(key: str) -> str:
+    return os.path.join("models", MODELS[key]["file"])
+
 
 try:
     import onnxruntime as ort
@@ -30,24 +47,32 @@ except Exception:
     HAVE_ORT = False
 
 
-def download_model(path: str = MODEL_PATH, url: str = MODEL_URL) -> str:
+def download_model(key: str = DEFAULT_MODEL) -> str:
     import urllib.request
+    path, url = _model_path(key), MODELS[key]["url"]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    urllib.request.urlretrieve(url, path)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
+        f.write(r.read())
     return path
 
 
 class MLDepth:
     """Lazy wrapper around the ONNX MiDaS model."""
 
-    def __init__(self, model_path: str = MODEL_PATH):
-        self.model_path = model_path
+    def __init__(self, model_key: str = DEFAULT_MODEL):
+        self.set_model(model_key)
+
+    def set_model(self, model_key: str):
+        self.key = model_key
+        self.spec = MODELS[model_key]
+        self.model_path = _model_path(model_key)
+        self.size = self.spec["size"]
         self._sess = None
         self._in = None
-        self.error = None
         self.provider = None            # active execution provider once loaded
-        if not HAVE_ORT:
-            self.error = "onnxruntime not installed (pip install onnxruntime)"
+        self.error = None if HAVE_ORT else \
+            "onnxruntime not installed (pip install onnxruntime-directml)"
 
     @staticmethod
     def ir_to_input(ir_gray: np.ndarray) -> np.ndarray:
@@ -90,7 +115,8 @@ class MLDepth:
         if not self._ensure():
             return None
         h, w = color_bgr.shape[:2]
-        x = cv2.cvtColor(cv2.resize(color_bgr, (_SIZE, _SIZE)), cv2.COLOR_BGR2RGB)
+        x = cv2.cvtColor(cv2.resize(color_bgr, (self.size, self.size)),
+                         cv2.COLOR_BGR2RGB)
         x = x.astype(np.float32) / 255.0
         x = (x - _MEAN) / _STD
         x = np.transpose(x, (2, 0, 1))[None]
