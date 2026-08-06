@@ -188,6 +188,7 @@ class ViewerGUI:
     def run(self):
         print("Opening cameras (this powers on the IR emitter)...", flush=True)
         self.cams.open()
+        self.cams.start_pump()   # capture on a background thread at full sensor rate
         print(f"  color: {self.cams.color_size}   ir: {self.cams.ir_size}", flush=True)
         self.root.after(0, self._tick)
         self.root.mainloop()
@@ -195,8 +196,8 @@ class ViewerGUI:
     def _tick(self):
         try:
             self._frame_i += 1
-            color = self.cams.read_color()
-            ir = self.cams.read_ir()
+            color = self.cams.latest_color()
+            ir = self.cams.latest_ir()
             # once, on the first good frame pair, load a saved calibration
             if not self._calib_tried and color is not None and ir is not None:
                 self._calib_tried = True
@@ -320,8 +321,8 @@ class ViewerGUI:
         self.root.update_idletasks()
         pairs = []
         for _ in range(15):
-            color = self.cams.read_color()
-            ir = self.cams.read_ir()
+            color = self.cams.latest_color()
+            ir = self.cams.latest_ir()
             if color is not None and ir is not None:
                 pairs.append((ir, color))
             time.sleep(0.04)
@@ -399,8 +400,8 @@ class ViewerGUI:
         self.writer.write(frame)
 
     def _grab_current(self):
-        color = self.cams.read_color()
-        ir = self.cams.read_ir()
+        color = self.cams.latest_color()
+        ir = self.cams.latest_ir()
         return self._render(color, ir)
 
     def _open_folder(self):

@@ -12,6 +12,8 @@ exclusive mode is what powers on the IR emitter.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -109,6 +111,12 @@ class SurfaceCameras:
         # counts distinct *illuminated* IR frames accepted (held-frame stream);
         # lets a consumer measure the true illuminated frame rate
         self.ir_new_count: int = 0
+        # background capture pump (decouples sensor rate from the render loop)
+        self._pump: threading.Thread | None = None
+        self._pump_stop: threading.Event | None = None
+        self._lock = threading.Lock()
+        self._cache_color: np.ndarray | None = None
+        self._cache_ir: np.ndarray | None = None
 
     # -- public sync API ---------------------------------------------------
     def open(self):
@@ -141,10 +149,50 @@ class SurfaceCameras:
         return self._last_ir                # dark strobe frame -> hold previous
 
     def close(self):
+        self.stop_pump()
         try:
             asyncio.run(self._close_async())
         except Exception:
             pass
+
+    # -- background capture pump ------------------------------------------
+    def start_pump(self, interval: float = 0.002):
+        """Continuously pull frames off the sensor on a background thread so
+        capture runs at the full sensor rate regardless of how fast the render
+        loop consumes them. Consumers then read latest_color()/latest_ir()."""
+        if self._pump is not None:
+            return
+        self._pump_stop = threading.Event()
+
+        def loop():
+            while not self._pump_stop.is_set():
+                c = self.read_color() if self.want_color else None
+                ir = self.read_ir() if self.want_ir else None
+                if c is not None or ir is not None:
+                    with self._lock:
+                        if c is not None:
+                            self._cache_color = c
+                        if ir is not None:
+                            self._cache_ir = ir
+                time.sleep(interval)
+
+        self._pump = threading.Thread(target=loop, name="ir-pump", daemon=True)
+        self._pump.start()
+
+    def stop_pump(self):
+        if self._pump is None:
+            return
+        self._pump_stop.set()
+        self._pump.join(timeout=1.0)
+        self._pump = None
+
+    def latest_color(self) -> np.ndarray | None:
+        with self._lock:
+            return self._cache_color
+
+    def latest_ir(self) -> np.ndarray | None:
+        with self._lock:
+            return self._cache_ir
 
     # -- internals ---------------------------------------------------------
     def _read(self, ref: _SourceRef, conv):

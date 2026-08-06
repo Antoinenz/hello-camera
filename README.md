@@ -71,6 +71,17 @@ chassis, the transform is constant — so the result is **saved to
 > layer detects and holds the last illuminated frame, which stabilises the live
 > view and gives auto-align a usable image.
 
+### Frame rate
+
+The IR sensor exposes a single mode — **480×480 L8 @ 60fps** — and that is its
+maximum; there is no higher-rate format to request. To actually capture at that
+rate, frames are pulled on a **background thread** (`SurfaceCameras.start_pump`)
+and cached, so the sensor runs full-speed independently of the render loop. The
+GUI then draws the freshest frame as fast as it can (the "FPS" overlay shows the
+draw rate; the "IR fps" line shows the true capture rate). Heavier modes
+(fusion) draw slower than light ones (raw IR), but no captured frames are
+dropped either way.
+
 Keyboard shortcuts mirror the menus:
 
 | Key | Action |
