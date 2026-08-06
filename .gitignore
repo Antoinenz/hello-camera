@@ -9,7 +9,8 @@ env/
 # App output
 captures/
 recordings/
-calibration.json    # machine-specific IR<->RGB alignment
+# machine-specific IR<->RGB alignment
+calibration.json
 *.mp4
 *.png
 !docs/*.png
