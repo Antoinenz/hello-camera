@@ -23,6 +23,7 @@ from PIL import Image, ImageTk
 
 from .capture import SurfaceCameras
 from . import processing as P
+from .mldepth import MLDepth
 
 try:
     import pyvirtualcam
@@ -61,6 +62,7 @@ class ViewerGUI:
         self.calib_path = calib_path
         self._calib_tried = False
         self.stereo_calib = P.load_stereo_calib("captures/stereo_calib.npz")
+        self.mldepth = MLDepth()
         self.cams = SurfaceCameras(color=True, ir=True)
         self.aligner = P.Aligner()
         self.alpha = 0.5
@@ -147,6 +149,10 @@ class ViewerGUI:
         view.add_cascade(label="IR source", menu=ir_menu)
 
         depth_menu = tk.Menu(view, tearoff=0)
+        depth_menu.add_radiobutton(
+            label="ML monocular (neural net)" if self.mldepth.available
+            else "ML monocular (run download_model.py first)",
+            value="ml", variable=self.depth_method_var)
         depth_menu.add_radiobutton(label="Auto (stereo in good light, else IR)",
                                    value="auto", variable=self.depth_method_var)
         depth_menu.add_radiobutton(label="Stereo (RGB<->IR parallax)",
@@ -362,9 +368,14 @@ class ViewerGUI:
         short grace, so flipping modes doesn't churn the hardware)."""
         mode = self.mode_var.get()
         need_c, need_i = MODE_SOURCES.get(mode, (True, True))
-        # the depth mode needs the color camera too when it may use stereo
-        if mode == "proximity" and self.depth_method_var.get() != "proximity":
-            need_c = True
+        # depth sub-methods have different sensor needs
+        if mode == "proximity":
+            dm = self.depth_method_var.get()
+            uses_ml = dm == "ml" or (dm == "auto" and self.mldepth.available)
+            if uses_ml:
+                need_c, need_i = True, False    # ML uses only the color image
+            elif dm != "proximity":
+                need_c = True                   # stereo/portrait/calibrated need both
         now = time.time()
         self._color_unused_since = None if need_c else (
             self._color_unused_since or now)
@@ -416,9 +427,23 @@ class ViewerGUI:
         return color
 
     def _render_depth(self, color, ir):
+        method = self.depth_method_var.get()
+        # ML monocular depth uses only the color image (no IR needed); auto
+        # prefers it when the model is present.
+        want_ml = method == "ml" or (method == "auto" and self.mldepth.available)
+        if want_ml:
+            if color is None:
+                return None
+            out = self.mldepth.depth_map(color) if self.mldepth.available else None
+            if out is not None:
+                self._depth_note("ML monocular" if method == "ml" else "auto: ML")
+                return out
+            if method == "ml":
+                self._depth_note(f"ML unavailable ({self.mldepth.error or 'no model'})"
+                                 " - run scripts/download_model.py")
+            method = "auto"                     # fall back until model present
         if ir is None:
             return None
-        method = self.depth_method_var.get()
         # need a color frame for stereo/portrait; fall back to proximity without
         if method == "proximity" or color is None:
             self._depth_note("proximity")
@@ -440,9 +465,7 @@ class ViewerGUI:
         return P.stereo_depth(color, aligned)
 
     def _depth_note(self, note):
-        if getattr(self, "_last_depth_note", None) != note:
-            self._last_depth_note = note
-            self.status.config(text=f"depth: {note}")
+        self._depth_active = note        # shown in the status bar (see _update_status)
 
     def _show(self, frame):
         cw = max(1, self.canvas.winfo_width())
@@ -524,6 +547,8 @@ class ViewerGUI:
         if not self.statusbar_var.get():
             return
         desc = dict(MODES)[self.mode_var.get()]
+        if self.mode_var.get() == "proximity" and getattr(self, "_depth_active", None):
+            desc = f"Depth [{self._depth_active}]"
         rec = "  ● REC" if self.writer is not None else ""
         h, w = frame.shape[:2]
         ir = f"   |   IR {self._ir_fps:4.1f} fps" if self._holding_phase() else ""

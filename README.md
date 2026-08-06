@@ -154,12 +154,18 @@ Output files go to `captures/`.
 ## Depth
 
 The Surface Hello camera has no dedicated depth sensor (no time-of-flight), so
-there's no *metric* depth to read. But the color and IR sensors sit a few cm
-apart — a real **stereo baseline** — so their two views of the scene disagree by
-an amount that depends on distance (parallax). The **Depth map** mode
-(`View → Depth method`) offers:
+there's no *metric* depth to read. The **Depth map** mode (`View → Depth method`)
+offers several estimators:
 
-- **Stereo (parallax)** — the improved method. After the IR is aligned onto the
+- **ML monocular (neural net)** — **the best-looking by far, and recommended.**
+  A small MiDaS network (ONNX Runtime, CPU, ~30ms) predicts depth from a single
+  RGB frame using learned monocular cues — no calibration, no IR, no stereo
+  matching. Clean silhouettes, smooth gradients, correct near/far. Needs a
+  one-time model download (~66MB): `python scripts/download_model.py`. Uses only
+  the color camera, so the IR emitter powers down in this mode.
+- **Stereo (parallax)** — the color and IR sensors sit a few cm apart (a real
+  stereo baseline), so their views disagree by an amount that depends on
+  distance. After the IR is aligned onto the
   RGB, whatever displacement remains is stereo disparity. We recover it with
   dense optical flow (in a contrast-normalized domain for cross-modal
   robustness), project it onto the baseline axis, and false-color the result.
@@ -177,18 +183,13 @@ an amount that depends on distance (parallax). The **Depth map** mode
   uses that as a crisp cutout mask and colours it by the stereo disparity
   (near/far *within* the subject) while dimming the background. Cleaner-looking
   than raw stereo for portraits.
-- **Calibrated (checkerboard stereo)** — the true-quality path. Run
-  `python scripts/stereo_calibrate.py` once with a printed checkerboard to
-  compute a real stereo calibration (`captures/stereo_calib.npz`); the app then
-  rectifies both views and runs proper stereo matching (metric-ish depth) —
-  far more accurate than the uncalibrated methods. Falls back to stereo until
-  the calibration file exists.
-- **Auto** *(default)* — uses stereo when the color image has enough contrast,
-  and falls back to proximity in low light (where the color sensor goes near-
-  black and stereo has nothing to match). The status bar shows which is active.
-
-ML monocular depth (MiDaS) remains a possible future opt-in (needs PyTorch,
-~2GB) and is left commented in `requirements.txt`.
+- **Calibrated (checkerboard stereo)** — a classical stereo-calibration path
+  (`python scripts/stereo_calibrate.py` with a printed checkerboard). In
+  practice, cross-modal / cross-resolution calibration of this RGB+IR pair is
+  finicky and hasn't beaten the ML method — kept as an experiment.
+- **Auto** *(default)* — picks the best available: **ML** if the model is
+  downloaded, otherwise stereo in good light and proximity in low light (where
+  the color sensor goes near-black). The status bar shows which is active.
 
 ### Stereo calibration (for the Calibrated method)
 

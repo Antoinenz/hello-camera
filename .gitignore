@@ -11,6 +11,10 @@ captures/
 recordings/
 # machine-specific IR<->RGB alignment
 calibration.json
+
+# downloaded ML model (fetch with scripts/download_model.py)
+models/
+
 *.mp4
 *.png
 !docs/*.png
